@@ -22,6 +22,7 @@ The API gateway is the only public entry point. All bodies are JSON. Money is in
 | `GET /v1/account/trades?limit=` | trader | Your own fills, newest first. |
 | `GET /v1/account/history?interval=&limit=` | trader | Your account's total value (cash plus holdings at last prices) as `open`/`high`/`low`/`close` candles, oldest first, with the same `interval` options as market candles. See below. |
 | `POST /v1/orders` | trader | Places an order, returning `202` with the accepted order. See below. |
+| `GET /v1/leaderboard?limit=` | — | Traders ranked by account value, highest first, as `{tick, starting_cash, traders, standings, you}`. Each standing has `rank`, `username`, `total_value` and `gain` (value less starting cash), and equal values share a rank. `you` is the caller's own standing when a trader token is sent, even outside the limit, and `null` otherwise. Admins and market makers are not ranked. Standings are computed once per tick, so a new trader appears after the next auction. |
 | `GET /v1/market/symbols` | — | The tradable symbols, each with `name` and `reference_price`. |
 | `GET /v1/market/prices` | — | Every symbol's current price, as one pre-built snapshot that changes once per tick. It supports `ETag`/`If-None-Match`, which returns `304` while unchanged. |
 | `GET /v1/market/{symbol}/quote` | — | Last clearing price. Returns `404` if the symbol hasn't traded yet. |
@@ -112,7 +113,7 @@ T3_ADMIN_PASSWORD=change-me go run ./cmd/server
 
 ## Web app
 
-`web/` is the browser client: a Preact single-page app, built by Vite and served by nginx in the `t3-web` container. Anyone can browse prices, charts and the tape. Signed-in traders also see their account value, positions and fills, and can place orders. The Portfolio page (`#/portfolio`) charts their account value over time, shows their allocation, and lists each holding with its return against its average cost. It talks only to the public API above.
+`web/` is the browser client: a Preact single-page app, built by Vite and served by nginx in the `t3-web` container. Anyone can browse prices, charts and the tape. Signed-in traders also see their account value, positions and fills, and can place orders. The Portfolio page (`#/portfolio`) charts their account value over time, shows their allocation, and lists each holding with its return against its average cost. Anyone can view the Leaderboard page (`#/leaderboard`), which ranks traders by account value. It talks only to the public API above.
 
 The container reads `T3_API_URL` at startup and serves it to the app as `/config.json`, and also allows it in the page's Content Security Policy, so one image works for any deployment. Compose sets it from `T3_PUBLIC_API_URL`.
 

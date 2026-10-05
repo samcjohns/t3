@@ -917,11 +917,12 @@ select:focus {
 	flex-direction: column;
 	min-width: 0;
 }
-.holdings .sub {
+.holdings .sub,
+.standings .sub {
 	display: block;
 	font-size: 12px;
 }
-.holdings td:not(.up):not(.down) .sub {
+td:not(.up):not(.down) .sub {
 	color: var(--muted);
 }
 .weight {
@@ -937,6 +938,81 @@ select:focus {
 	display: block;
 	height: 100%;
 	border-radius: 2px;
+}
+
+/* Leaderboard */
+
+.board {
+	max-width: 880px;
+	margin: 0 auto;
+	padding-top: 16px;
+}
+.board-head {
+	display: flex;
+	justify-content: space-between;
+	align-items: flex-end;
+	gap: 16px 32px;
+	flex-wrap: wrap;
+	margin-bottom: 12px;
+}
+.board-sub {
+	margin-top: 6px;
+	color: var(--muted);
+}
+.standings td {
+	vertical-align: middle;
+}
+.standings .rank-col {
+	width: 64px;
+	text-align: center;
+}
+.standings .rank,
+.standings .medal {
+	display: inline-grid;
+	place-items: center;
+	min-width: 28px;
+	height: 28px;
+	padding: 0 6px;
+	border-radius: 14px;
+	font-weight: 600;
+}
+.standings .rank {
+	color: var(--muted);
+}
+.standings .medal {
+	background: var(--panel-2);
+	box-shadow: inset 0 0 0 1.5px var(--medal);
+	color: var(--text);
+}
+.medal.m1 {
+	--medal: #e3b341;
+}
+.medal.m2 {
+	--medal: #a9b4bf;
+}
+.medal.m3 {
+	--medal: #c98a5a;
+}
+.standings tr.mine td {
+	background: color-mix(in srgb, var(--accent) 10%, transparent);
+}
+.standings tr.mine td:first-child {
+	box-shadow: inset 3px 0 0 var(--accent);
+}
+.you-tag {
+	margin-left: 8px;
+	padding: 1px 6px;
+	border-radius: 4px;
+	background: var(--accent);
+	color: #fff;
+	font: 600 11px var(--sans);
+	vertical-align: 1px;
+}
+.standings tr.gap td {
+	padding: 2px 8px;
+	color: var(--muted);
+	text-align: center;
+	border-bottom: 0;
 }
 
 .folio-signin {

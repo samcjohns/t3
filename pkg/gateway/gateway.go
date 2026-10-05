@@ -97,6 +97,7 @@ type Gateway struct {
 	metrics *metrics
 	log     *slog.Logger
 	mux     *http.ServeMux
+	board   leaderboard
 }
 
 func New(market Market, ldg Ledger, reports Reports, cfg Config) *Gateway {
@@ -174,6 +175,8 @@ func (g *Gateway) routes() {
 	g.handle("GET /v1/account/trades", trader, g.getAccountTrades)
 	g.handle("GET /v1/account/history", trader, g.getAccountHistory)
 	g.handle("POST /v1/orders", trader, g.placeOrder)
+
+	g.handle("GET /v1/leaderboard", public, g.getLeaderboard)
 
 	g.handle("GET /v1/market/symbols", public, g.listSymbols)
 	// Served outside handle: the hottest public read skips token lookup and

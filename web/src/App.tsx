@@ -3,6 +3,7 @@ import { useCallback, useEffect, useMemo, useState } from 'preact/hooks';
 import type { Api, Candle, Fill, Interval, Portfolio, Trade } from './api';
 import { AuthPanel } from './components/AuthPanel';
 import { Chart } from './components/Chart';
+import { Leaderboard } from './components/Leaderboard';
 import { Markets } from './components/Markets';
 import { Portfolio as PortfolioPage } from './components/Portfolio';
 import { Fills, Positions, Tape } from './components/Tables';
@@ -28,19 +29,20 @@ export function App({ api }: { api: Api }) {
 	const prices = useMemo(() => new Map(snapshot?.prices.map((p) => [p.symbol, p])), [snapshot]);
 	const symbol = prices.has(route.symbol) ? route.symbol : (snapshot?.prices[0]?.symbol ?? '');
 	const onPortfolio = route.page === 'portfolio';
+	const onTrade = route.page === 'trade';
 	const price = prices.get(symbol);
 	const tick = snapshot?.tick;
 
 	// Chart and tape follow the selected symbol and refresh every auction.
 	useEffect(() => {
-		if (!symbol || onPortfolio) return;
+		if (!symbol || !onTrade) return;
 		let live = true;
 		api.candles(symbol, interval).then((c) => live && setCandles(c), () => {});
 		api.trades(symbol).then((t) => live && setTape(t), () => {});
 		return () => {
 			live = false;
 		};
-	}, [api, symbol, interval, tick, onPortfolio]);
+	}, [api, symbol, interval, tick, onTrade]);
 
 	// Clear the chart only when switching what it shows, not on each refresh.
 	useEffect(() => setCandles(null), [symbol, interval]);
@@ -76,11 +78,14 @@ export function App({ api }: { api: Api }) {
 					<span>virtual stock market</span>
 				</a>
 				<nav class="pages" aria-label="Pages">
-					<a href={`#/${encodeURIComponent(symbol)}`} aria-current={onPortfolio ? undefined : 'page'}>
+					<a href={`#/${encodeURIComponent(symbol)}`} aria-current={onTrade ? 'page' : undefined}>
 						Trade
 					</a>
 					<a href="#/portfolio" aria-current={onPortfolio ? 'page' : undefined}>
 						Portfolio
+					</a>
+					<a href="#/leaderboard" aria-current={route.page === 'leaderboard' ? 'page' : undefined}>
+						Leaderboard
 					</a>
 				</nav>
 				<div class="auction" title="Orders are matched in a batch auction at every tick.">
@@ -109,7 +114,7 @@ export function App({ api }: { api: Api }) {
 			</header>
 
 			{/* The portfolio page has its own, fuller summary. */}
-			{portfolio && !onPortfolio && (
+			{portfolio && onTrade && (
 				<section class="summary" aria-label="Account summary">
 					<Stat label="Account value" value={money(portfolio.total_value)} big />
 					<Stat label="Cash available" value={money(portfolio.cash - portfolio.cash_held)} />
@@ -118,7 +123,9 @@ export function App({ api }: { api: Api }) {
 				</section>
 			)}
 
-			{snapshot && onPortfolio ? (
+			{snapshot && route.page === 'leaderboard' ? (
+				<Leaderboard api={api} username={session?.user.username} tick={snapshot.tick} />
+			) : snapshot && onPortfolio ? (
 				session && portfolio ? (
 					<PortfolioPage
 						api={api}

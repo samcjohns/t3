@@ -56,6 +56,9 @@ func TestUserStore(t *testing.T) {
 	if err := s.CreateUser(ctx, mm); err != nil {
 		t.Fatalf("market maker role: %v", err)
 	}
+	if traders, err := s.Traders(ctx); err != nil || !reflect.DeepEqual(traders, []gateway.User{rec.User}) {
+		t.Fatalf("Traders = %+v %v", traders, err)
+	}
 	if err := s.DeleteUser(ctx, "usr_1"); err != nil {
 		t.Fatal(err)
 	}

@@ -10,6 +10,8 @@ import (
 	"encoding/hex"
 	"errors"
 	"regexp"
+	"slices"
+	"strings"
 	"sync"
 	"time"
 )
@@ -58,6 +60,8 @@ type UserStore interface {
 	DeleteUser(ctx context.Context, id string) error
 	// UserByName returns ok=false if there is no such user.
 	UserByName(ctx context.Context, username string) (u UserRecord, ok bool, err error)
+	// Traders returns every user with the trader role, in username order.
+	Traders(ctx context.Context) ([]User, error)
 	CreateSession(ctx context.Context, d TokenDigest, userID string, expires time.Time) error
 	// Session returns ok=false if the session does not exist.
 	Session(ctx context.Context, d TokenDigest) (u User, expires time.Time, ok bool, err error)
@@ -206,6 +210,19 @@ func (m *MemoryUserStore) UserByName(_ context.Context, username string) (UserRe
 	defer m.mu.RUnlock()
 	u, ok := m.byName[username]
 	return u, ok, nil
+}
+
+func (m *MemoryUserStore) Traders(_ context.Context) ([]User, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	out := []User{}
+	for _, u := range m.byName {
+		if u.Role == RoleTrader {
+			out = append(out, u.User)
+		}
+	}
+	slices.SortFunc(out, func(a, b User) int { return strings.Compare(a.Username, b.Username) })
+	return out, nil
 }
 
 func (m *MemoryUserStore) CreateSession(_ context.Context, d TokenDigest, userID string, expires time.Time) error {

@@ -65,6 +65,17 @@ func (s *UserStore) UserByName(ctx context.Context, username string) (gateway.Us
 	return u, err == nil, err
 }
 
+func (s *UserStore) Traders(ctx context.Context) ([]gateway.User, error) {
+	rows, err := s.pool.Query(ctx, `SELECT id, username, role FROM gateway.users WHERE role = $1 ORDER BY username`, gateway.RoleTrader)
+	if err != nil {
+		return nil, err
+	}
+	return pgx.CollectRows(rows, func(row pgx.CollectableRow) (gateway.User, error) {
+		var u gateway.User
+		return u, row.Scan(&u.ID, &u.Username, &u.Role)
+	})
+}
+
 func (s *UserStore) CreateSession(ctx context.Context, d gateway.TokenDigest, userID string, expires time.Time) error {
 	_, err := s.pool.Exec(ctx, `INSERT INTO gateway.sessions (token_digest, user_id, expires_at) VALUES ($1, $2, $3)`,
 		d[:], userID, expires)

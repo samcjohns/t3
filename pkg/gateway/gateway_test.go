@@ -5,11 +5,13 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"net/netip"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -565,5 +567,49 @@ func TestRateLimitPerTunnelClient(t *testing.T) {
 	}
 	if get("203.0.113.2") != 200 {
 		t.Fatal("a second client behind the same tunnel shares the first one's limit")
+	}
+}
+
+func TestLeaderboard(t *testing.T) {
+	e := newEnv(t, nil)
+	alice, aliceID := e.trader("alice")
+	bob, _ := e.trader("bob")
+	carol, _ := e.trader("carol")
+	root := e.admin()
+	if _, err := e.gw.CreateUser(context.Background(), "mm-flow", "market maker", RoleMarketMaker); err != nil {
+		t.Fatal(err)
+	}
+
+	// Alice sells 10 deposited ACME to bob at 1500: she ends 15,000 up, bob
+	// holds shares worth what he paid, and carol ties with him.
+	e.expect(e.do("POST", "/v1/admin/accounts/"+aliceID+"/shares", root, map[string]any{"symbol": "ACME", "quantity": 10}), http.StatusOK)
+	e.expect(e.do("POST", "/v1/orders", alice, map[string]any{"symbol": "ACME", "direction": "SELL", "type": "LIMIT", "quantity": 10, "limit_price": 1500}), http.StatusAccepted)
+	e.expect(e.do("POST", "/v1/orders", bob, map[string]any{"symbol": "ACME", "direction": "BUY", "type": "LIMIT", "quantity": 10, "limit_price": 1500}), http.StatusAccepted)
+	e.tick()
+
+	lb := e.expect(e.do("GET", "/v1/leaderboard", "", nil), http.StatusOK).body
+	if num(lb["traders"]) != 3 || num(lb["starting_cash"]) != 100_000 || lb["you"] != nil {
+		t.Fatalf("leaderboard = %v", lb)
+	}
+	var got []string
+	for _, s := range lb["standings"].([]any) {
+		m := s.(map[string]any)
+		got = append(got, fmt.Sprintf("%v %s %v %v", m["rank"], m["username"], m["total_value"], m["gain"]))
+	}
+	want := []string{"1 alice 115000 15000", "2 bob 100000 0", "2 carol 100000 0"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("standings = %q, want %q", got, want)
+	}
+
+	// The signed-in trader sees their own standing beyond the limit.
+	top := e.expect(e.do("GET", "/v1/leaderboard?limit=1", carol, nil), http.StatusOK).body
+	if n := len(top["standings"].([]any)); n != 1 {
+		t.Fatalf("limited to %d standings", n)
+	}
+	if you := top["you"].(map[string]any); you["username"] != "carol" || num(you["rank"]) != 2 {
+		t.Fatalf("you = %v", you)
+	}
+	if _, leaked := top["you"].(map[string]any)["userID"]; leaked {
+		t.Fatal("standings must not reveal account IDs")
 	}
 }

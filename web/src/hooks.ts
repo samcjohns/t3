@@ -105,16 +105,16 @@ export function useSession(api: Api) {
 	return [session, setSession] as const;
 }
 
-export type Page = 'trade' | 'portfolio';
+export type Page = 'trade' | 'portfolio' | 'leaderboard';
 
 /**
- * The page and symbol in the URL hash: #/ACME for a symbol's trading view, or
- * #/portfolio. Both survive reloads and can be linked.
+ * The page and symbol in the URL hash: #/ACME for a symbol's trading view,
+ * #/portfolio or #/leaderboard. All survive reloads and can be linked.
  */
 export function useRoute() {
 	const read = () => {
 		const path = decodeURIComponent(location.hash.replace(/^#\/?/, ''));
-		return path === 'portfolio' ? { page: 'portfolio' as Page, symbol: '' } : { page: 'trade' as Page, symbol: path.toUpperCase() };
+		return path === 'portfolio' || path === 'leaderboard' ? { page: path as Page, symbol: '' } : { page: 'trade' as Page, symbol: path.toUpperCase() };
 	};
 	const [route, setRoute] = useState(read);
 	useEffect(() => {
@@ -129,7 +129,7 @@ export function useRoute() {
 	}, []);
 	/** Moves between pages, so the back button returns. */
 	const open = useCallback((page: Page, symbol = '') => {
-		location.hash = page === 'portfolio' ? '#/portfolio' : `#/${encodeURIComponent(symbol)}`;
+		location.hash = page === 'trade' ? `#/${encodeURIComponent(symbol)}` : `#/${page}`;
 	}, []);
 	return { ...route, select, open };
 }

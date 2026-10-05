@@ -91,6 +91,26 @@ export interface Portfolio {
 	total_value: number;
 }
 
+export interface Standing {
+	/** Shared by equal values: two traders tied for first are both 1. */
+	rank: number;
+	username: string;
+	total_value: number;
+	/** total_value less the starting cash. */
+	gain: number;
+}
+
+export interface Leaderboard {
+	tick: number;
+	/** What every trader starts with. */
+	starting_cash: number;
+	/** How many traders are ranked in all. */
+	traders: number;
+	standings: Standing[];
+	/** The signed-in trader's own standing, even outside the top. */
+	you: Standing | null;
+}
+
 export interface OrderRequest {
 	symbol: string;
 	direction: Direction;
@@ -183,6 +203,9 @@ export class Api {
 	}
 	async history(interval: Interval, limit = 120) {
 		return (await this.request<{ candles: ValueCandle[] }>('GET', `/v1/account/history?interval=${interval}&limit=${limit}`)).candles;
+	}
+	leaderboard(limit = 100) {
+		return this.request<Leaderboard>('GET', `/v1/leaderboard?limit=${limit}`);
 	}
 	placeOrder(order: OrderRequest) {
 		return this.request<Order>('POST', '/v1/orders', order);
