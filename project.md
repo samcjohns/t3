@@ -7,7 +7,6 @@ Build and ship a live-hosted virtual stock market system with a Frequent Batch A
 ## Design Choices
 
 - Use a Frequent Batch Auction (FBA) matching engine.
-- Use a dynamic batch size that increases if processes time approach the heartbeat interval.
 - The market service should handle no authentication, but should just accept trusted, formatted requests from the authentication service which sits in front of it.
 - An API gateway (authentication service) will sit in front of the market service to handle login, user account tokens, and rate limiting. The market service will not handle any of these concerns.
 - Design the entire system to be universal regardless of the service sending requests such as the web app, CLI, or third-party integrations.

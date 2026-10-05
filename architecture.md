@@ -52,3 +52,10 @@
 - Can aggregate data from multiple sources within the system
 - Caches data for performance and scalability
 - Prevents reports and analytics from affecting the performance of the Market Engine
+
+### Internal Market Makers
+
+- *Multiple containers utilizing different trading algorithms*
+- Responsibilities:
+    - provide liquidity to the market
+    - ensuring that there are always buy and sell orders available
