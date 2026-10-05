@@ -2,6 +2,7 @@ package gateway
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"strconv"
 	"time"
@@ -52,6 +53,60 @@ func (g *Gateway) logout(w http.ResponseWriter, r *http.Request, _ *User) error 
 	if err := g.auth.revoke(r.Context(), token); err != nil {
 		return err
 	}
+	w.WriteHeader(http.StatusNoContent)
+	return nil
+}
+
+func (g *Gateway) getProfile(w http.ResponseWriter, r *http.Request, u *User) error {
+	var token *APIToken
+	t, ok, err := g.auth.store.APIToken(r.Context(), u.ID)
+	if err != nil {
+		return err
+	}
+	if ok {
+		token = &t
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"user": u, "api_token": token})
+	return nil
+}
+
+func (g *Gateway) changePassword(w http.ResponseWriter, r *http.Request, u *User) error {
+	var req struct {
+		CurrentPassword string `json:"current_password"`
+		NewPassword     string `json:"new_password"`
+	}
+	if err := decodeJSON(w, r, &req); err != nil {
+		return err
+	}
+	token, _ := bearerToken(r)
+	err := g.auth.changePassword(r.Context(), *u, req.CurrentPassword, req.NewPassword, token)
+	if errors.Is(err, ErrInvalidCredentials) {
+		// Not 401: the session is still valid, only the password is wrong.
+		return apiError{http.StatusForbidden, "invalid_credentials", "current password is incorrect"}
+	}
+	if err != nil {
+		return err
+	}
+	g.log.Info("password changed", "user_id", u.ID)
+	w.WriteHeader(http.StatusNoContent)
+	return nil
+}
+
+func (g *Gateway) createAPIToken(w http.ResponseWriter, r *http.Request, u *User) error {
+	token, t, err := g.auth.issueAPIToken(r.Context(), *u)
+	if err != nil {
+		return err
+	}
+	g.log.Info("api token issued", "user_id", u.ID, "hint", t.Hint)
+	writeJSON(w, http.StatusCreated, map[string]any{"token": token, "hint": t.Hint, "created_at": t.CreatedAt})
+	return nil
+}
+
+func (g *Gateway) deleteAPIToken(w http.ResponseWriter, r *http.Request, u *User) error {
+	if err := g.auth.store.DeleteAPIToken(r.Context(), u.ID); err != nil {
+		return err
+	}
+	g.log.Info("api token revoked", "user_id", u.ID)
 	w.WriteHeader(http.StatusNoContent)
 	return nil
 }

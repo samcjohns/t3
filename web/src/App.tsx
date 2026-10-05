@@ -1,6 +1,7 @@
 import type { ComponentChildren } from 'preact';
 import { useCallback, useEffect, useMemo, useState } from 'preact/hooks';
 import type { Api, Candle, Fill, Interval, Portfolio, Trade } from './api';
+import { AccountMenu } from './components/AccountMenu';
 import { AuthPanel } from './components/AuthPanel';
 import { Chart } from './components/Chart';
 import { Leaderboard } from './components/Leaderboard';
@@ -105,7 +106,7 @@ export function App({ api }: { api: Api }) {
 				</div>
 				{session && (
 					<div class="who">
-						<span>{session.user.username}</span>
+						<AccountMenu api={api} user={session.user} />
 						<button class="link" onClick={signOut}>
 							Sign out
 						</button>

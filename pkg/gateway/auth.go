@@ -38,10 +38,22 @@ var usernamePattern = regexp.MustCompile(`^[a-z0-9_-]{3,32}$`)
 
 // User is a gateway identity. Its ID doubles as its ledger account ID.
 type User struct {
-	ID       string `json:"id"`
-	Username string `json:"username"`
-	Role     Role   `json:"role"`
+	ID        string    `json:"id"`
+	Username  string    `json:"username"`
+	Role      Role      `json:"role"`
+	CreatedAt time.Time `json:"created_at"`
 }
+
+// APIToken describes a user's long-lived API token without revealing it.
+type APIToken struct {
+	// Hint is the token's first characters, to tell tokens apart.
+	Hint      string    `json:"hint"`
+	CreatedAt time.Time `json:"created_at"`
+}
+
+// APITokenPrefix starts every API token, which tells them apart from
+// session tokens.
+const APITokenPrefix = "t3_"
 
 // UserRecord is a user with their PBKDF2-SHA256 credentials.
 type UserRecord struct {
@@ -67,6 +79,16 @@ type UserStore interface {
 	Session(ctx context.Context, d TokenDigest) (u User, expires time.Time, ok bool, err error)
 	DeleteSession(ctx context.Context, d TokenDigest) error
 	DeleteExpiredSessions(ctx context.Context, now time.Time) error
+	// DeleteUserSessions deletes all of a user's sessions except one.
+	DeleteUserSessions(ctx context.Context, userID string, except TokenDigest) error
+	SetPassword(ctx context.Context, userID string, salt, hash []byte) error
+	// SetAPIToken gives a user an API token, replacing any they had.
+	SetAPIToken(ctx context.Context, userID string, d TokenDigest, t APIToken) error
+	DeleteAPIToken(ctx context.Context, userID string) error
+	// APIToken returns ok=false if the user has no API token.
+	APIToken(ctx context.Context, userID string) (t APIToken, ok bool, err error)
+	// UserByAPIToken returns ok=false if no user has the token.
+	UserByAPIToken(ctx context.Context, d TokenDigest) (u User, ok bool, err error)
 }
 
 // auth implements login and token checks on top of a UserStore.
@@ -106,7 +128,7 @@ func (a *auth) createUser(ctx context.Context, username, password string, role R
 	if len(password) < 8 || len(password) > 128 {
 		return User{}, ErrInvalidPassword
 	}
-	rec := UserRecord{User: User{ID: newID("usr"), Username: username, Role: role}, Salt: randomBytes(16)}
+	rec := UserRecord{User: User{ID: newID("usr"), Username: username, Role: role, CreatedAt: a.clock().UTC().Truncate(time.Microsecond)}, Salt: randomBytes(16)}
 	rec.Hash = a.derive(password, rec.Salt)
 	if err := a.store.CreateUser(ctx, rec); err != nil {
 		return User{}, err
@@ -150,8 +172,26 @@ func (a *auth) issue(ctx context.Context, user User) (token string, expires time
 	return token, expires, nil
 }
 
-func (a *auth) lookup(ctx context.Context, token string) (User, bool, error) {
+// credential is how a request authenticated.
+type credential int
+
+const (
+	viaSession credential = iota + 1
+	viaAPIToken
+)
+
+// lookup resolves a session or API token to its user.
+func (a *auth) lookup(ctx context.Context, token string) (User, credential, bool, error) {
 	d := digest(token)
+	if strings.HasPrefix(token, APITokenPrefix) {
+		u, ok, err := a.store.UserByAPIToken(ctx, d)
+		return u, viaAPIToken, ok, err
+	}
+	u, ok, err := a.session(ctx, d)
+	return u, viaSession, ok, err
+}
+
+func (a *auth) session(ctx context.Context, d TokenDigest) (User, bool, error) {
 	u, expires, ok, err := a.store.Session(ctx, d)
 	if err != nil || !ok {
 		return User{}, false, err
@@ -166,13 +206,46 @@ func (a *auth) revoke(ctx context.Context, token string) error {
 	return a.store.DeleteSession(ctx, digest(token))
 }
 
+// changePassword checks the user's current password, sets the new one, and
+// signs out every other session, keeping the one making the change.
+func (a *auth) changePassword(ctx context.Context, u User, current, next, keepToken string) error {
+	if _, err := a.authenticate(ctx, u.Username, current); err != nil {
+		return err
+	}
+	if len(next) < 8 || len(next) > 128 {
+		return ErrInvalidPassword
+	}
+	salt := randomBytes(16)
+	if err := a.store.SetPassword(ctx, u.ID, salt, a.derive(next, salt)); err != nil {
+		return err
+	}
+	return a.store.DeleteUserSessions(ctx, u.ID, digest(keepToken))
+}
+
+// issueAPIToken creates a new API token for the user, revoking any old one.
+// Only its digest is stored, so the token is shown just this once.
+func (a *auth) issueAPIToken(ctx context.Context, u User) (string, APIToken, error) {
+	token := APITokenPrefix + base64.RawURLEncoding.EncodeToString(randomBytes(32))
+	t := APIToken{Hint: token[:len(APITokenPrefix)+8], CreatedAt: a.clock().UTC().Truncate(time.Microsecond)}
+	if err := a.store.SetAPIToken(ctx, u.ID, digest(token), t); err != nil {
+		return "", APIToken{}, err
+	}
+	return token, t, nil
+}
+
 func digest(token string) TokenDigest { return sha256.Sum256([]byte(token)) }
 
 // MemoryUserStore is an in-memory UserStore.
 type MemoryUserStore struct {
-	mu       sync.RWMutex
-	byName   map[string]UserRecord
-	sessions map[TokenDigest]memSession
+	mu        sync.RWMutex
+	byName    map[string]UserRecord
+	sessions  map[TokenDigest]memSession
+	apiTokens map[string]memAPIToken // by user ID
+}
+
+type memAPIToken struct {
+	digest TokenDigest
+	APIToken
 }
 
 type memSession struct {
@@ -181,7 +254,7 @@ type memSession struct {
 }
 
 func NewMemoryUserStore() *MemoryUserStore {
-	return &MemoryUserStore{byName: map[string]UserRecord{}, sessions: map[TokenDigest]memSession{}}
+	return &MemoryUserStore{byName: map[string]UserRecord{}, sessions: map[TokenDigest]memSession{}, apiTokens: map[string]memAPIToken{}}
 }
 
 func (m *MemoryUserStore) CreateUser(_ context.Context, u UserRecord) error {
@@ -202,6 +275,12 @@ func (m *MemoryUserStore) DeleteUser(_ context.Context, id string) error {
 			delete(m.byName, name)
 		}
 	}
+	for d, s := range m.sessions {
+		if s.userID == id {
+			delete(m.sessions, d)
+		}
+	}
+	delete(m.apiTokens, id)
 	return nil
 }
 
@@ -273,4 +352,63 @@ func randomBytes(n int) []byte {
 
 func newID(prefix string) string {
 	return prefix + "_" + hex.EncodeToString(randomBytes(12))
+}
+
+func (m *MemoryUserStore) DeleteUserSessions(_ context.Context, userID string, except TokenDigest) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for d, s := range m.sessions {
+		if s.userID == userID && d != except {
+			delete(m.sessions, d)
+		}
+	}
+	return nil
+}
+
+func (m *MemoryUserStore) SetPassword(_ context.Context, userID string, salt, hash []byte) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for name, u := range m.byName {
+		if u.ID == userID {
+			u.Salt, u.Hash = salt, hash
+			m.byName[name] = u
+		}
+	}
+	return nil
+}
+
+func (m *MemoryUserStore) SetAPIToken(_ context.Context, userID string, d TokenDigest, t APIToken) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.apiTokens[userID] = memAPIToken{d, t}
+	return nil
+}
+
+func (m *MemoryUserStore) DeleteAPIToken(_ context.Context, userID string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	delete(m.apiTokens, userID)
+	return nil
+}
+
+func (m *MemoryUserStore) APIToken(_ context.Context, userID string) (APIToken, bool, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	t, ok := m.apiTokens[userID]
+	return t.APIToken, ok, nil
+}
+
+func (m *MemoryUserStore) UserByAPIToken(_ context.Context, d TokenDigest) (User, bool, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	for id, t := range m.apiTokens {
+		if t.digest == d {
+			for _, u := range m.byName {
+				if u.ID == id {
+					return u.User, true, nil
+				}
+			}
+		}
+	}
+	return User{}, false, nil
 }

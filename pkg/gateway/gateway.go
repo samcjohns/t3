@@ -149,7 +149,11 @@ type access int
 
 const (
 	public access = iota
+	// trader accepts a session or an API token.
 	trader
+	// session needs a signed-in session: an API token can trade, but cannot
+	// change the credentials that control the account.
+	session
 	admin
 )
 
@@ -168,9 +172,13 @@ func (g *Gateway) routes() {
 
 	g.handle("POST /v1/auth/register", public, g.register)
 	g.handle("POST /v1/auth/login", public, g.login)
-	g.handle("POST /v1/auth/logout", trader, g.logout)
+	g.handle("POST /v1/auth/logout", session, g.logout)
 
 	g.handle("GET /v1/account", trader, g.getAccount)
+	g.handle("GET /v1/account/profile", trader, g.getProfile)
+	g.handle("POST /v1/account/password", session, g.changePassword)
+	g.handle("POST /v1/account/api-token", session, g.createAPIToken)
+	g.handle("DELETE /v1/account/api-token", session, g.deleteAPIToken)
 	g.handle("GET /v1/account/portfolio", trader, g.getPortfolio)
 	g.handle("GET /v1/account/trades", trader, g.getAccountTrades)
 	g.handle("GET /v1/account/history", trader, g.getAccountHistory)
@@ -262,15 +270,16 @@ func (g *Gateway) handle(pattern string, acc access, h handlerFunc) {
 		start := g.cfg.Clock()
 		rec := &statusRecorder{ResponseWriter: w, status: http.StatusOK}
 		var user *User
+		var cred credential
 		err := func() error {
 			token, hasToken := bearerToken(r)
 			if hasToken {
-				u, ok, err := g.auth.lookup(r.Context(), token)
+				u, c, ok, err := g.auth.lookup(r.Context(), token)
 				if err != nil {
 					return err
 				}
 				if ok {
-					user = &u
+					user, cred = &u, c
 				}
 			}
 
@@ -293,6 +302,8 @@ func (g *Gateway) handle(pattern string, acc access, h handlerFunc) {
 				return apiError{http.StatusUnauthorized, "unauthorized", "a valid bearer token is required"}
 			case acc == admin && user.Role != RoleAdmin:
 				return apiError{http.StatusForbidden, "forbidden", "admin role required"}
+			case acc == session && cred != viaSession:
+				return apiError{http.StatusForbidden, "forbidden", "this endpoint needs a signed-in session, not an API token"}
 			}
 			return h(rec, r, user)
 		}()
@@ -360,7 +371,7 @@ func (g *Gateway) cors(next http.Handler) http.Handler {
 			h.Set("Access-Control-Allow-Origin", origin)
 			h.Add("Vary", "Origin")
 			if r.Method == http.MethodOptions {
-				h.Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+				h.Set("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS")
 				h.Set("Access-Control-Allow-Headers", "Authorization, Content-Type")
 				h.Set("Access-Control-Max-Age", "600")
 				w.WriteHeader(http.StatusNoContent)

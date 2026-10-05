@@ -2,9 +2,15 @@
 
 The API gateway is the only public entry point. All bodies are JSON. Money is in integer cents, and the domain payloads are described in [contracts.md](contracts.md).
 
+To trade from your own code, see [bots.md](bots.md).
+
 ## Conventions
 
-- **Auth:** send `Authorization: Bearer <token>`, using a token from `POST /v1/auth/login`. Tokens are opaque and expire after 24 hours.
+- **Auth:** send `Authorization: Bearer <token>`. There are two kinds of token, and both are opaque:
+  - A **session token** comes from `POST /v1/auth/login` and expires after 24 hours. The web app uses these.
+  - An **API token** is for bots and scripts. It starts with `t3_`, never expires, and stays valid until it is regenerated or revoked. Create one from the account popup in the web app (click your username), or with `POST /v1/account/api-token`. Each account has at most one. It is shown only when created, because the server stores just its SHA-256 digest.
+
+  API tokens work on every `trader` endpoint. Endpoints marked `session` need a session token, so a leaked API token can trade but can't change the password, manage tokens or lock the owner out.
 - **Errors:** every error returns `{"error": {"code": "...", "message": "..."}}`.
 - **Rate limits:** clients get 10 requests per second with bursts of up to 20. Limits are counted per user when a valid token is sent, and per client IP otherwise; `/v1/market/prices` is always counted per IP. Accounts with the internal `market_maker` role are exempt. An over-limit request gets `429` with a `Retry-After` header.
 - **Request bodies:** a body must be a single JSON object of at most 64 KiB. Unknown fields are rejected.
@@ -16,8 +22,12 @@ The API gateway is the only public entry point. All bodies are JSON. Money is in
 | --- | --- | --- |
 | `POST /v1/auth/register` | — | `{username, password}` → `201` user. Creates a ledger account with the starting cash. |
 | `POST /v1/auth/login` | — | `{username, password}` → `{token, expires_at, user}` |
-| `POST /v1/auth/logout` | trader | Revokes the token → `204` |
+| `POST /v1/auth/logout` | session | Revokes the session token → `204` |
 | `GET /v1/account` | trader | Ledger balances and holdings, including the amounts held. |
+| `GET /v1/account/profile` | trader | `{user, api_token}`: the user with `created_at`, and the API token's `{hint, created_at}`, or `null` if there is none. It never includes the token itself. |
+| `POST /v1/account/password` | session | `{current_password, new_password}` → `204`. Signs out every other session. The API token keeps working. A wrong current password returns `403 invalid_credentials`, not `401`, because the session is still valid. |
+| `POST /v1/account/api-token` | session | Creates an API token, replacing any existing one → `201 {token, hint, created_at}`. This is the only time `token` is returned. |
+| `DELETE /v1/account/api-token` | session | Revokes the API token → `204` |
 | `GET /v1/account/portfolio` | trader | Holdings valued at last prices. Each position's `cost_basis` is what its shares cost at their average purchase price, or `null` if some predate the retained trade history (such as deposited shares). |
 | `GET /v1/account/trades?limit=` | trader | Your own fills, newest first. |
 | `GET /v1/account/history?interval=&limit=` | trader | Your account's total value (cash plus holdings at last prices) as `open`/`high`/`low`/`close` candles, oldest first, with the same `interval` options as market candles. See below. |
@@ -56,7 +66,7 @@ History is rebuilt by rewinding the account's current balances through its fills
 | --- | --- |
 | 400 | `bad_request`, `invalid_order`, `invalid_amount`, `invalid_interval`, `invalid_username`, `invalid_password` |
 | 401 | `unauthorized`, `invalid_credentials` |
-| 403 | `forbidden` |
+| 403 | `forbidden`, `invalid_credentials` (wrong current password on a password change) |
 | 404 | `unknown_symbol`, `unknown_account` |
 | 409 | `username_taken`, `duplicate_order` |
 | 422 | `insufficient_funds`, `insufficient_shares` |

@@ -202,6 +202,201 @@ button:disabled {
 	box-shadow: inset 0 -2px 0 var(--accent);
 }
 
+/* Account popup */
+
+.account {
+	position: relative;
+}
+.account-btn {
+	display: flex;
+	align-items: center;
+	gap: 6px;
+	padding: 5px 10px;
+	border: 1px solid var(--line);
+	border-radius: 7px;
+	background: none;
+	font-weight: 500;
+}
+.account-btn:hover,
+.account-btn[aria-expanded='true'] {
+	background: var(--panel-2);
+}
+.account-btn span {
+	color: var(--muted);
+	font-size: 10px;
+}
+.popup {
+	position: absolute;
+	top: calc(100% + 8px);
+	right: 0;
+	z-index: 20;
+	width: min(360px, calc(100vw - 32px));
+	max-height: calc(100vh - 80px);
+	overflow-y: auto;
+	background: var(--panel);
+	border: 1px solid var(--line);
+	border-radius: var(--radius);
+	box-shadow: 0 12px 32px rgb(0 0 0 / 0.35);
+}
+.popup-head {
+	display: flex;
+	align-items: center;
+	gap: 12px;
+	padding: 16px;
+}
+.popup-head b {
+	font: 600 16px var(--mono);
+}
+.popup-head p {
+	font-size: 12px;
+}
+.avatar {
+	display: grid;
+	place-items: center;
+	width: 40px;
+	height: 40px;
+	flex: none;
+	border-radius: 50%;
+	background: color-mix(in srgb, var(--accent) 22%, var(--panel-2));
+	color: var(--text);
+	font: 600 17px var(--mono);
+}
+.popup-section {
+	display: flex;
+	flex-direction: column;
+	gap: 10px;
+	padding: 14px 16px 16px;
+	border-top: 1px solid var(--line);
+}
+.popup-section h3 {
+	margin: 0;
+	font-size: 12px;
+	font-weight: 600;
+	letter-spacing: 0.06em;
+	text-transform: uppercase;
+	color: var(--muted);
+}
+.popup code {
+	font: 12px var(--mono);
+	overflow-wrap: anywhere;
+}
+.api-info {
+	display: flex;
+	flex-direction: column;
+	gap: 6px;
+	align-self: stretch;
+	margin: 0;
+	padding: 8px 10px;
+	border-radius: 8px;
+	background: var(--panel-2);
+}
+.api-info div {
+	display: grid;
+	grid-template-columns: 58px minmax(0, 1fr);
+	gap: 8px;
+	align-items: baseline;
+}
+.api-info dt {
+	color: var(--muted);
+	font-size: 12px;
+}
+.api-info dd {
+	margin: 0;
+}
+.token {
+	display: flex;
+	flex-direction: column;
+	align-items: flex-start;
+	gap: 10px;
+}
+.token > * {
+	max-width: 100%;
+}
+.token .notice {
+	align-self: stretch;
+}
+.token-hint {
+	display: flex;
+	flex-wrap: wrap;
+	align-items: baseline;
+	gap: 4px 10px;
+}
+.token-hint code {
+	padding: 3px 6px;
+	border-radius: 5px;
+	background: var(--panel-2);
+}
+.token-hint span {
+	font-size: 12px;
+}
+.copy-row {
+	display: flex;
+	gap: 6px;
+	align-self: stretch;
+}
+.copy-row input {
+	font-size: 12px;
+	padding: 7px 9px;
+}
+.confirm {
+	display: flex;
+	flex-direction: column;
+	gap: 8px;
+	align-self: stretch;
+	padding: 10px;
+	border-radius: 8px;
+	background: var(--panel-2);
+	font-size: 13px;
+}
+.btn-row {
+	display: flex;
+	gap: 6px;
+}
+.small-btn {
+	padding: 6px 12px;
+	border: 1px solid var(--line);
+	border-radius: 7px;
+	background: var(--panel-2);
+	font-size: 13px;
+	font-weight: 500;
+	white-space: nowrap;
+}
+.small-btn:hover:not(:disabled) {
+	border-color: var(--muted);
+}
+.small-btn.primary {
+	border-color: transparent;
+	background: var(--accent);
+	color: #fff;
+}
+.small-btn.danger {
+	color: var(--down);
+}
+.small-btn.primary.danger,
+.confirm .small-btn.danger {
+	border-color: transparent;
+	background: var(--down);
+	color: #1b0606;
+}
+.small-btn:disabled {
+	opacity: 0.5;
+}
+.notice.warn {
+	background: color-mix(in srgb, #e3b341 16%, transparent);
+	color: var(--text);
+}
+.password-form {
+	display: flex;
+	flex-direction: column;
+	gap: 10px;
+}
+.password-form .small-btn {
+	align-self: flex-start;
+}
+.password-form input {
+	padding: 7px 10px;
+}
+
 /* Account summary */
 
 .summary {
@@ -1076,6 +1271,19 @@ td:not(.up):not(.down) .sub {
 	.who {
 		padding-left: 0;
 		border-left: 0;
+	}
+	/* The account popup spans the header rather than hanging off the button. */
+	.top {
+		position: relative;
+	}
+	.account {
+		position: static;
+	}
+	.popup {
+		left: 0;
+		right: 0;
+		top: calc(100% - 4px);
+		width: auto;
 	}
 	.desk {
 		grid-template-columns: minmax(0, 1fr);

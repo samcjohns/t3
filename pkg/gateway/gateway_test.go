@@ -613,3 +613,72 @@ func TestLeaderboard(t *testing.T) {
 		t.Fatal("standings must not reveal account IDs")
 	}
 }
+
+func TestAPITokens(t *testing.T) {
+	e := newEnv(t, nil)
+	session, _ := e.trader("alice")
+
+	prof := e.expect(e.do("GET", "/v1/account/profile", session, nil), http.StatusOK).body
+	if prof["api_token"] != nil || prof["user"].(map[string]any)["created_at"] != "2026-10-04T12:00:00Z" {
+		t.Fatalf("profile = %v", prof)
+	}
+
+	created := e.expect(e.do("POST", "/v1/account/api-token", session, nil), http.StatusCreated).body
+	token := created["token"].(string)
+	if !strings.HasPrefix(token, APITokenPrefix) || !strings.HasPrefix(token, created["hint"].(string)) {
+		t.Fatalf("created = %v", created)
+	}
+	prof = e.expect(e.do("GET", "/v1/account/profile", session, nil), http.StatusOK).body
+	if prof["api_token"].(map[string]any)["hint"] != created["hint"] || strings.Contains(mustJSON(prof), token) {
+		t.Fatalf("profile must describe the token without revealing it: %v", prof)
+	}
+
+	// A bot can read the account and trade with the token...
+	e.expect(e.do("GET", "/v1/account/portfolio", token, nil), http.StatusOK)
+	e.expect(e.do("POST", "/v1/orders", token, map[string]any{
+		"symbol": "ACME", "direction": "BUY", "type": "LIMIT", "quantity": 1, "limit_price": 1000, "time_in_force": "IOC",
+	}), http.StatusAccepted)
+	// ...but not take over the account.
+	for _, r := range []struct{ method, path string }{
+		{"POST", "/v1/account/api-token"}, {"DELETE", "/v1/account/api-token"}, {"POST", "/v1/auth/logout"},
+	} {
+		if res := e.expect(e.do(r.method, r.path, token, nil), http.StatusForbidden); res.errorCode() != "forbidden" {
+			t.Fatalf("%s %s with API token: %v", r.method, r.path, res.body)
+		}
+	}
+	e.expect(e.do("POST", "/v1/account/password", token, map[string]string{"current_password": "correct horse", "new_password": "x"}), http.StatusForbidden)
+
+	// Regenerating revokes the old token; deleting revokes the new one.
+	next := e.expect(e.do("POST", "/v1/account/api-token", session, nil), http.StatusCreated).body["token"].(string)
+	e.expect(e.do("GET", "/v1/account", token, nil), http.StatusUnauthorized)
+	e.expect(e.do("GET", "/v1/account", next, nil), http.StatusOK)
+	e.expect(e.do("DELETE", "/v1/account/api-token", session, nil), http.StatusNoContent)
+	e.expect(e.do("GET", "/v1/account", next, nil), http.StatusUnauthorized)
+	e.expect(e.do("GET", "/v1/account", APITokenPrefix+"made-up", nil), http.StatusUnauthorized)
+}
+
+func TestChangePassword(t *testing.T) {
+	e := newEnv(t, nil)
+	session, _ := e.trader("alice")
+	other := e.expect(e.do("POST", "/v1/auth/login", "", map[string]string{"username": "alice", "password": "correct horse"}), http.StatusOK).body["token"].(string)
+	apiToken := e.expect(e.do("POST", "/v1/account/api-token", session, nil), http.StatusCreated).body["token"].(string)
+	change := func(current, next string) response {
+		return e.do("POST", "/v1/account/password", session, map[string]string{"current_password": current, "new_password": next})
+	}
+
+	// A wrong password is 403, not 401, so clients don't treat the session as expired.
+	if res := e.expect(change("wrong password", "battery staple"), http.StatusForbidden); res.errorCode() != "invalid_credentials" {
+		t.Fatalf("wrong current password: %v", res.body)
+	}
+	if res := e.expect(change("correct horse", "short"), http.StatusBadRequest); res.errorCode() != "invalid_password" {
+		t.Fatalf("short new password: %v", res.body)
+	}
+	e.expect(change("correct horse", "battery staple"), http.StatusNoContent)
+
+	// Other sessions are signed out; this one and the API token keep working.
+	e.expect(e.do("GET", "/v1/account", other, nil), http.StatusUnauthorized)
+	e.expect(e.do("GET", "/v1/account", session, nil), http.StatusOK)
+	e.expect(e.do("GET", "/v1/account", apiToken, nil), http.StatusOK)
+	e.expect(e.do("POST", "/v1/auth/login", "", map[string]string{"username": "alice", "password": "correct horse"}), http.StatusUnauthorized)
+	e.expect(e.do("POST", "/v1/auth/login", "", map[string]string{"username": "alice", "password": "battery staple"}), http.StatusOK)
+}

@@ -5,6 +5,19 @@ export interface User {
 	id: string;
 	username: string;
 	role: 'trader' | 'admin' | 'market_maker';
+	created_at: string;
+}
+
+/** A long-lived API token, described without revealing it. */
+export interface ApiToken {
+	/** The token's first characters, e.g. "t3_AbCd1234". */
+	hint: string;
+	created_at: string;
+}
+
+export interface Profile {
+	user: User;
+	api_token: ApiToken | null;
 }
 
 export interface Session {
@@ -143,7 +156,7 @@ export class Api {
 	onUnauthorized?: () => void;
 	token?: string;
 
-	constructor(private readonly base: string) {}
+	constructor(readonly base: string) {}
 
 	private async request<T>(method: string, path: string, body?: unknown): Promise<T> {
 		const headers: Record<string, string> = {};
@@ -193,6 +206,20 @@ export class Api {
 	}
 	async trades(symbol: string, limit = 40) {
 		return (await this.request<{ trades: Trade[] }>('GET', `/v1/market/${encodeURIComponent(symbol)}/trades?limit=${limit}`)).trades;
+	}
+
+	profile() {
+		return this.request<Profile>('GET', '/v1/account/profile');
+	}
+	changePassword(current_password: string, new_password: string) {
+		return this.request<void>('POST', '/v1/account/password', { current_password, new_password });
+	}
+	/** Issues a new API token, revoking any old one. The token is only ever returned here. */
+	createApiToken() {
+		return this.request<ApiToken & { token: string }>('POST', '/v1/account/api-token');
+	}
+	deleteApiToken() {
+		return this.request<void>('DELETE', '/v1/account/api-token');
 	}
 
 	portfolio() {
