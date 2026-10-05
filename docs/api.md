@@ -60,7 +60,7 @@ Order entry returns `503 market_halted` if the ledger falls more than 3 ticks be
 
 ## Running
 
-To deploy, run `./deploy.sh`. It pulls the latest code (`git pull --ff-only`), builds the images, starts the full stack (`t3-postgres`, `t3-server`, `t3-mm-liquidity` and `t3-mm-flow`), and waits until `/readyz` reports ready. Use `--skip-pull` to deploy the current checkout.
+To deploy, run `./deploy.sh`. It pulls the latest code (`git pull --ff-only`), builds the images, starts the full stack (`t3-postgres`, `t3-server`, `t3-mm-liquidity`, `t3-mm-flow` and `t3-web`), and waits until the server's `/readyz` and the web app report healthy. Use `--skip-pull` to deploy the current checkout. Locally, the web app is at `http://localhost:3000` and the API at `http://localhost:8080`.
 
 Put secrets in a git-ignored `.env` file next to the script:
 
@@ -68,11 +68,19 @@ Put secrets in a git-ignored `.env` file next to the script:
 T3_ADMIN_PASSWORD=...
 T3_MARKET_MAKER_PASSWORD=...
 T3_PORT=8080
+T3_WEB_PORT=3000
 ```
 
 Without them, the script warns and falls back to the development passwords in `docker-compose.yml`.
 
-To serve through a reverse proxy or tunnel in another Compose project, set `T3_EDGE_NETWORK` to a shared external Docker network. `deploy.sh` then creates that network if needed, publishes no host port, and attaches `t3-server` to it (`docker-compose.edge.yml`), so the proxy reaches the API at `http://t3-server:8080`. It also trusts `CF-Connecting-IP` from that network's subnet, so rate limits apply per real client rather than per proxy.
+To serve through a reverse proxy or tunnel in another Compose project, set `T3_EDGE_NETWORK` to a shared external Docker network. `deploy.sh` then creates that network if needed, publishes no host ports, and attaches `t3-server` and `t3-web` to it (`docker-compose.edge.yml`). The proxy should give each its own public hostname, for example `t3-api.example.com` → `http://t3-server:8080` and `t3.example.com` → `http://t3-web:8080`. Keep `/metrics` off the public API hostname. The deploy also trusts `CF-Connecting-IP` from that network's subnet, so rate limits apply per real client rather than per proxy. Edge mode needs:
+
+```sh
+T3_EDGE_NETWORK=edge
+T3_PUBLIC_URL=https://t3.example.com          # the web app
+T3_PUBLIC_API_URL=https://t3-api.example.com  # the API, which browsers call directly
+T3_ALLOWED_ORIGINS=https://t3.example.com     # plus any other sites that call the API
+```
 
 To run the server alone in memory, with no database:
 
@@ -91,11 +99,27 @@ T3_ADMIN_PASSWORD=change-me go run ./cmd/server
 | `T3_MARKET_MAKER_PASSWORD` | — | If unset, no market makers are created |
 | `T3_MARKET_MAKER_CASH` | `500000000` | Cents seeded to each market maker; shares come from the listing |
 | `T3_STARTING_CASH` | `1000000` | Cents credited to each new trader |
-| `T3_ALLOWED_ORIGINS` | — | Comma-separated CORS origins |
+| `T3_ALLOWED_ORIGINS` | — | Comma-separated CORS origins. Compose defaults it to the local web app. |
 | `T3_ADMIN_USERNAME` | `admin` | Bootstrap admin username |
 | `T3_ADMIN_PASSWORD` | — | If unset, no admin is created |
 | `T3_TRUSTED_PROXIES` | — | Comma-separated CIDRs whose connections may name the client in `CF-Connecting-IP`. `deploy.sh` sets it in edge mode. |
 | `T3_LOG_LEVEL` | `info` | `debug`, `info`, `warn` or `error` |
+
+## Web app
+
+`web/` is the browser client: a Preact single-page app, built by Vite and served by nginx in the `t3-web` container. Anyone can browse prices, charts and the tape. Signed-in traders also see their account value, positions and fills, and can place orders. It talks only to the public API above.
+
+The container reads `T3_API_URL` at startup and serves it to the app as `/config.json`, and also allows it in the page's Content Security Policy, so one image works for any deployment. Compose sets it from `T3_PUBLIC_API_URL`.
+
+To work on it with live reload against a running API:
+
+```sh
+cd web && npm install && npm run dev   # http://localhost:3000
+```
+
+The dev server has no `/config.json`, so it uses `VITE_T3_API_URL`, or `http://localhost:8080` by default. The API must list `http://localhost:3000` in `T3_ALLOWED_ORIGINS`, which is the Compose default.
+
+There is no endpoint to list or cancel open orders yet, so the order ticket defaults to IOC. A GTC limit order keeps its funds held until it fills.
 
 ## Market makers
 

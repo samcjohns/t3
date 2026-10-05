@@ -1,0 +1,34 @@
+# The nginx image runs envsubst over these templates at startup. Only
+# environment variables are replaced, so nginx's own $variables survive.
+server {
+    listen 8080;
+    root /usr/share/nginx/html;
+    server_tokens off;
+
+    location = /healthz {
+        access_log off;
+        default_type text/plain;
+        return 200 "ok\n";
+    }
+
+    # Runtime config, so one image serves any deployment.
+    location = /config.json {
+        include conf.d/security-headers.inc;
+        add_header Cache-Control no-cache;
+        default_type application/json;
+        return 200 '{"apiUrl":"${T3_API_URL}"}';
+    }
+
+    # Vite fingerprints everything under /assets.
+    location /assets/ {
+        include conf.d/security-headers.inc;
+        add_header Cache-Control "public, max-age=31536000, immutable";
+    }
+
+    # Single-page app: unknown paths get the app shell.
+    location / {
+        include conf.d/security-headers.inc;
+        add_header Cache-Control no-cache;
+        try_files $uri /index.html;
+    }
+}

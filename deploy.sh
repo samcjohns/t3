@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Pulls the latest code, then builds and (re)starts the whole t3 stack:
-# Postgres, the server and both market makers.
+# Postgres, the server, both market makers and the web app.
 #
 # Usage: ./deploy.sh [--skip-pull]
 #
@@ -8,9 +8,12 @@
 # (git-ignored), e.g.:
 #   T3_ADMIN_PASSWORD=...
 #   T3_MARKET_MAKER_PASSWORD=...
-#   T3_PORT=8080          # host port, when not using an edge network
+#   T3_PORT=8080          # API host port, when not using an edge network
+#   T3_WEB_PORT=3000      # web app host port, likewise
 #   T3_EDGE_NETWORK=edge  # optional: serve via a proxy/tunnel on this network
-#   T3_PUBLIC_URL=https://t3.example.com
+#   T3_PUBLIC_URL=https://t3.example.com          # the web app (edge mode)
+#   T3_PUBLIC_API_URL=https://t3-api.example.com  # the API (required in edge mode)
+#   T3_ALLOWED_ORIGINS=https://t3.example.com
 set -euo pipefail
 
 # Everything runs from main, at the bottom, so bash has read the whole script
@@ -23,7 +26,7 @@ main() {
 		case "$arg" in
 		--skip-pull) pull=false ;;
 		-h | --help)
-			sed -n '2,14p' "$0"
+			sed -n '2,17p' "$0"
 			exit 0
 			;;
 		*) die "unknown argument: $arg (try --help)" ;;
@@ -46,8 +49,13 @@ main() {
 	done
 
 	compose=(docker compose -f docker-compose.yml)
-	local url="http://localhost:${T3_PORT:-8080}"
+	local web="http://localhost:${T3_WEB_PORT:-3000}" api="http://localhost:${T3_PORT:-8080}"
 	if [[ -n "${T3_EDGE_NETWORK:-}" ]]; then
+		[[ -n "${T3_PUBLIC_API_URL:-}" ]] ||
+			die "T3_PUBLIC_API_URL must be set in edge mode: the web app calls the API there"
+		if [[ -n "${T3_PUBLIC_URL:-}" && ",${T3_ALLOWED_ORIGINS:-}," != *",$T3_PUBLIC_URL,"* ]]; then
+			warn "T3_ALLOWED_ORIGINS does not include T3_PUBLIC_URL; the web app's API calls will fail CORS"
+		fi
 		if ! docker network inspect "$T3_EDGE_NETWORK" >/dev/null 2>&1; then
 			step "Creating shared network $T3_EDGE_NETWORK"
 			docker network create "$T3_EDGE_NETWORK" >/dev/null
@@ -57,7 +65,8 @@ main() {
 			-f '{{range .IPAM.Config}}{{.Subnet}},{{end}}')
 		export T3_TRUSTED_PROXIES=${T3_TRUSTED_PROXIES%,}
 		compose+=(-f docker-compose.edge.yml)
-		url="${T3_PUBLIC_URL:-http://t3-server:8080 on the $T3_EDGE_NETWORK network}"
+		web="${T3_PUBLIC_URL:-http://t3-web:8080 on the $T3_EDGE_NETWORK network}"
+		api=$T3_PUBLIC_API_URL
 	fi
 
 	if $pull; then
@@ -72,13 +81,15 @@ main() {
 	step "Starting containers"
 	"${compose[@]}" up -d --remove-orphans
 
-	wait_healthy t3-server
+	wait_healthy t3-server server
+	wait_healthy t3-web web
 
 	"${compose[@]}" ps --format 'table {{.Name}}\t{{.Status}}'
-	step "t3 is up at $url"
+	step "t3 is up: web app at $web, API at $api"
 }
 
-# wait_healthy waits for a container's health check (the server's /readyz).
+# wait_healthy waits for container $1 (Compose service $2) to pass its health
+# check, which for the server is /readyz.
 wait_healthy() {
 	step "Waiting for $1 to report healthy"
 	local status
@@ -88,7 +99,7 @@ wait_healthy() {
 		sleep 1
 	done
 	warn "$1 is $status after 60s; recent logs:"
-	"${compose[@]}" logs --tail 40 server
+	"${compose[@]}" logs --tail 40 "$2"
 	exit 1
 }
 
