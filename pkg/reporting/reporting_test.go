@@ -174,6 +174,106 @@ func TestPortfolio(t *testing.T) {
 	}
 }
 
+// trade is one execution between alice and bob, with alice buying or selling.
+func trade(symbol string, price, qty int64, aliceBuys bool, id string) engine.BookResult {
+	e := engine.Execution{Symbol: symbol, Price: price, Quantity: qty,
+		BuyOrderID: "b" + id, BuyAccountID: "alice", SellOrderID: "s" + id, SellAccountID: "bob"}
+	if !aliceBuys {
+		e.BuyAccountID, e.SellAccountID = "bob", "alice"
+	}
+	return engine.BookResult{Symbol: symbol, ClearingPrice: price, Volume: qty, Executions: []engine.Execution{e}}
+}
+
+// settle runs ticks through both the ledger and the reporting service.
+func settle(t *testing.T, l *ledger.Ledger, s *Service, trs ...engine.TickResult) {
+	t.Helper()
+	for _, tr := range trs {
+		must(t, l.ApplyTick(context.Background(), tr))
+		s.Ingest(tr)
+	}
+}
+
+func order(id, account string, dir engine.Direction, qty, limit int64) engine.Order {
+	return engine.Order{ID: id, AccountID: account, Symbol: "ACME", Direction: dir, Type: engine.Limit, Quantity: qty, LimitPrice: limit}
+}
+
+func TestCostBasisAndHistory(t *testing.T) {
+	ctx := context.Background()
+	l := ledger.New()
+	for _, a := range []string{"alice", "bob"} {
+		must(t, l.OpenAccount(ctx, a))
+		must(t, l.Deposit(ctx, a, 100_000, ""))
+	}
+	must(t, l.DepositShares(ctx, "bob", "ACME", 100, ""))
+	s := New(l, Config{})
+
+	// Alice buys 10 @ 1000 and 10 @ 1200, then sells 5 @ 1100.
+	must(t, l.Reserve(ctx, order("b1", "alice", engine.Buy, 10, 1000)))
+	must(t, l.Reserve(ctx, order("s1", "bob", engine.Sell, 10, 1000)))
+	settle(t, l, s, tick(1, t0.Add(10*time.Second), trade("ACME", 1000, 10, true, "1")))
+	must(t, l.Reserve(ctx, order("b2", "alice", engine.Buy, 10, 1200)))
+	must(t, l.Reserve(ctx, order("s2", "bob", engine.Sell, 10, 1200)))
+	settle(t, l, s, tick(2, t0.Add(2*time.Minute), trade("ACME", 1200, 10, true, "2")))
+	must(t, l.Reserve(ctx, order("b3", "bob", engine.Buy, 5, 1100)))
+	must(t, l.Reserve(ctx, order("s3", "alice", engine.Sell, 5, 1100)))
+	settle(t, l, s, tick(3, t0.Add(4*time.Minute+30*time.Second), trade("ACME", 1100, 5, false, "3")))
+	// Someone else trades ACME at 1300 in a later minute.
+	s.Ingest(tick(4, t0.Add(6*time.Minute), book("ACME", 1300)))
+	s.Ingest(tick(5, t0.Add(6*time.Minute+10*time.Second), engine.BookResult{Symbol: "ACME", ClearingPrice: 1300, Volume: 1,
+		Executions: []engine.Execution{{Symbol: "ACME", Price: 1300, Quantity: 1, BuyAccountID: "x", SellAccountID: "y"}}}))
+
+	p, err := s.Portfolio("alice")
+	must(t, err)
+	// Average cost 1100 a share; selling keeps it, leaving 15 * 1100.
+	if pos := p.Positions[0]; pos.Quantity != 15 || pos.CostBasis == nil || *pos.CostBasis != 16_500 {
+		t.Fatalf("alice position = %+v", pos)
+	}
+	// Bob's deposited shares have no known cost.
+	if p, _ := s.Portfolio("bob"); p.Positions[0].CostBasis != nil {
+		t.Fatalf("bob position = %+v", p.Positions[0])
+	}
+
+	// Alice's cash: 100,000 - 10,000 - 12,000 + 5,500 = 83,500.
+	one, err := s.AccountHistory("alice", time.Minute, 0)
+	must(t, err)
+	want := []ValueCandle{
+		{Start: t0, Open: 100_000, High: 100_000, Low: 100_000, Close: 100_000},
+		{Start: t0.Add(time.Minute), Open: 100_000, High: 100_000, Low: 100_000, Close: 100_000},
+		{Start: t0.Add(2 * time.Minute), Open: 100_000, High: 102_000, Low: 100_000, Close: 102_000},
+		{Start: t0.Add(3 * time.Minute), Open: 102_000, High: 102_000, Low: 102_000, Close: 102_000},
+		{Start: t0.Add(4 * time.Minute), Open: 102_000, High: 102_000, Low: 100_000, Close: 100_000},
+		{Start: t0.Add(5 * time.Minute), Open: 100_000, High: 100_000, Low: 100_000, Close: 100_000},
+		{Start: t0.Add(6 * time.Minute), Open: 100_000, High: 103_000, Low: 100_000, Close: 103_000},
+	}
+	if !reflect.DeepEqual(one, want) {
+		t.Fatalf("1m history =\n%+v\nwant\n%+v", one, want)
+	}
+	if last := one[len(one)-1].Close; last != p.TotalValue {
+		t.Fatalf("history ends at %d, portfolio is worth %d", last, p.TotalValue)
+	}
+
+	five, _ := s.AccountHistory("alice", 5*time.Minute, 0)
+	want5 := []ValueCandle{
+		{Start: t0, Open: 100_000, High: 102_000, Low: 100_000, Close: 100_000},
+		{Start: t0.Add(5 * time.Minute), Open: 100_000, High: 103_000, Low: 100_000, Close: 103_000},
+	}
+	if !reflect.DeepEqual(five, want5) {
+		t.Fatalf("5m history = %+v", five)
+	}
+
+	// A limit keeps the newest periods, rewound to the window's start.
+	lim, _ := s.AccountHistory("alice", time.Minute, 3)
+	if len(lim) != 3 || lim[0].Start != t0.Add(4*time.Minute) || lim[0].Open != 102_000 || lim[2].Close != 103_000 {
+		t.Fatalf("limited history = %+v", lim)
+	}
+	if _, err := s.AccountHistory("alice", 90*time.Second, 0); !errors.Is(err, ErrInvalidInterval) {
+		t.Fatalf("bad interval: %v", err)
+	}
+	if h, _ := s.AccountHistory("nobody", time.Minute, 0); h != nil {
+		t.Fatalf("unknown account history = %+v", h)
+	}
+}
+
 func must(t *testing.T, err error) {
 	t.Helper()
 	if err != nil {

@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'preact/hooks';
-import type { Candle, Interval } from '../api';
-import { money, shares, shortTime } from '../format';
+import type { Candle, Interval, ValueCandle } from '../api';
+import { axisMoney, money, shares, shortTime } from '../format';
 
 const HEIGHT = 300;
 const AXIS = 64; // right-hand price axis
@@ -8,12 +8,14 @@ const FOOT = 20; // time labels
 const VOLUME = 0.18; // share of the plot given to volume bars
 
 interface Props {
-	candles: Candle[] | null;
+	/** Price candles get volume bars; value candles have no volume. */
+	candles: (Candle | ValueCandle)[] | null;
 	interval: Interval;
+	empty?: string;
 }
 
-/** Candlesticks with volume, sized to its container. */
-export function Chart({ candles, interval }: Props) {
+/** Candlesticks, with volume when the candles have it, sized to its container. */
+export function Chart({ candles, interval, empty = 'No trades in this period yet.' }: Props) {
 	const box = useRef<HTMLDivElement>(null);
 	const [width, setWidth] = useState(0);
 	const [hover, setHover] = useState<number | null>(null);
@@ -29,20 +31,22 @@ export function Chart({ candles, interval }: Props) {
 	if (!candles.length) {
 		return (
 			<div class="chart chart-empty" ref={box}>
-				No trades in this period yet.
+				{empty}
 			</div>
 		);
 	}
 
 	const plotW = width - AXIS;
 	const plotH = HEIGHT - FOOT;
-	const priceH = plotH * (1 - VOLUME) - 8;
+	const hasVolume = 'volume' in candles[0];
+	const priceH = plotH * (hasVolume ? 1 - VOLUME : 1) - 8;
 	let lo = Math.min(...candles.map((c) => c.low));
 	let hi = Math.max(...candles.map((c) => c.high));
 	const pad = Math.max((hi - lo) * 0.08, hi * 0.004, 2);
 	lo -= pad;
 	hi += pad;
-	const maxVol = Math.max(...candles.map((c) => c.volume), 1);
+	const volume = (c: Candle | ValueCandle) => ('volume' in c ? c.volume : 0);
+	const maxVol = Math.max(...candles.map(volume), 1);
 
 	const step = plotW / candles.length;
 	const body = Math.max(1, Math.min(14, step * 0.7));
@@ -51,6 +55,7 @@ export function Chart({ candles, interval }: Props) {
 	const volY = (v: number) => plotH - (v / maxVol) * plotH * VOLUME;
 
 	const ticks = Array.from({ length: 5 }, (_, i) => lo + ((hi - lo) * (i + 0.5)) / 5);
+	const label = axisMoney(lo, hi, (hi - lo) / 5);
 	const labelEvery = Math.max(1, Math.ceil(90 / step));
 	const withDate = interval === '1d' || interval === '1h';
 	const last = candles[candles.length - 1];
@@ -70,14 +75,14 @@ export function Chart({ candles, interval }: Props) {
 				<span>H {money(shown.high)}</span>
 				<span>L {money(shown.low)}</span>
 				<span>C {money(shown.close)}</span>
-				<span>Vol {shares(shown.volume)}</span>
+				{'volume' in shown && <span>Vol {shares(shown.volume)}</span>}
 			</div>
 			<svg width={width} height={HEIGHT} onPointerMove={onMove} onPointerLeave={() => setHover(null)} role="img" aria-label="Price chart">
 				{ticks.map((p) => (
 					<g key={p}>
 						<line class="grid" x1={0} x2={plotW} y1={y(p)} y2={y(p)} />
 						<text class="axis" x={plotW + 6} y={y(p) + 4}>
-							{money(p)}
+							{label(p)}
 						</text>
 					</g>
 				))}
@@ -93,7 +98,7 @@ export function Chart({ candles, interval }: Props) {
 					const top = y(Math.max(c.open, c.close));
 					return (
 						<g key={c.start} class={`candle ${cls}`} opacity={hover === null || hover === i ? 1 : 0.55}>
-							<rect class="vol" x={x(i) - body / 2} y={volY(c.volume)} width={body} height={plotH - volY(c.volume)} />
+							{hasVolume && <rect class="vol" x={x(i) - body / 2} y={volY(volume(c))} width={body} height={plotH - volY(volume(c))} />}
 							<line x1={x(i)} x2={x(i)} y1={y(c.high)} y2={y(c.low)} />
 							<rect x={x(i) - body / 2} y={top} width={body} height={Math.max(1, y(Math.min(c.open, c.close)) - top)} />
 						</g>
@@ -102,7 +107,7 @@ export function Chart({ candles, interval }: Props) {
 				<line class="last" x1={0} x2={plotW} y1={y(last.close)} y2={y(last.close)} />
 				<rect class="last-tag" x={plotW + 1} y={y(last.close) - 9} width={AXIS - 2} height={18} rx={3} />
 				<text class="last-label" x={plotW + 6} y={y(last.close) + 4}>
-					{money(last.close)}
+					{label(last.close)}
 				</text>
 				{hover !== null && <line class="crosshair" x1={x(hover)} x2={x(hover)} y1={0} y2={plotH} />}
 			</svg>

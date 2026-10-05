@@ -10,6 +10,17 @@
 	--accent: #5aa9ff;
 	--up-soft: rgb(61 220 151 / 0.14);
 	--down-soft: rgb(255 107 107 / 0.14);
+	/* Categorical chart slots, in fixed order (validated for colour vision deficiency). */
+	--series-1: #3987e5;
+	--series-2: #d95926;
+	--series-3: #199e70;
+	--series-4: #c98500;
+	--series-5: #d55181;
+	--series-6: #008300;
+	--series-7: #9085e9;
+	--series-8: #e66767;
+	--other: #8696a7;
+	--cash: #3a4757;
 	--radius: 10px;
 	--sans: ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
 	--mono: ui-monospace, 'SF Mono', 'JetBrains Mono', Menlo, Consolas, monospace;
@@ -29,6 +40,16 @@
 		--accent: #1f6fd1;
 		--up-soft: rgb(15 157 99 / 0.12);
 		--down-soft: rgb(217 63 63 / 0.12);
+		--series-1: #2a78d6;
+		--series-2: #eb6834;
+		--series-3: #1baf7a;
+		--series-4: #eda100;
+		--series-5: #e87ba4;
+		--series-6: #008300;
+		--series-7: #4a3aa7;
+		--series-8: #e34948;
+		--other: #8a96a3;
+		--cash: #c5ced8;
 		color-scheme: light;
 	}
 }
@@ -156,6 +177,29 @@ button:disabled {
 }
 .link:hover {
 	text-decoration: underline;
+}
+
+/* Page navigation */
+
+.pages {
+	display: flex;
+	gap: 4px;
+}
+.pages a {
+	padding: 6px 12px;
+	border-radius: 7px;
+	color: var(--muted);
+	font-weight: 500;
+	text-decoration: none;
+}
+.pages a:hover {
+	color: var(--text);
+	background: var(--panel-2);
+}
+.pages a[aria-current='page'] {
+	color: var(--text);
+	background: var(--panel-2);
+	box-shadow: inset 0 -2px 0 var(--accent);
 }
 
 /* Account summary */
@@ -343,6 +387,7 @@ button:disabled {
 	background: none;
 	color: var(--muted);
 	font-weight: 500;
+	white-space: nowrap;
 }
 .segmented button.on {
 	background: var(--panel);
@@ -641,6 +686,295 @@ select:focus {
 	border-top: 1px solid var(--line);
 	font-size: 12px;
 	color: var(--muted);
+}
+
+/* Portfolio */
+
+.folio {
+	display: grid;
+	grid-template-columns: minmax(0, 1fr) 360px;
+	gap: 16px;
+	padding-top: 16px;
+	align-items: start;
+}
+.panel {
+	padding: 16px;
+	background: var(--panel);
+	border: 1px solid var(--line);
+	border-radius: var(--radius);
+	min-width: 0;
+}
+.folio-holdings {
+	grid-column: 1 / -1;
+}
+
+.folio-head {
+	display: flex;
+	justify-content: space-between;
+	align-items: flex-end;
+	gap: 16px 32px;
+	flex-wrap: wrap;
+}
+.hero {
+	margin-top: 4px;
+	font: 600 34px/1.1 var(--mono);
+	letter-spacing: -0.02em;
+	font-variant-numeric: tabular-nums;
+}
+.hero-change {
+	margin-top: 4px;
+	font: 14px var(--mono);
+	font-variant-numeric: tabular-nums;
+}
+.hero-change .muted {
+	font-family: var(--sans);
+}
+.folio-stats {
+	display: flex;
+	gap: 28px;
+	margin: 0;
+}
+.folio-stats dt {
+	color: var(--muted);
+	font-size: 12px;
+}
+.folio-stats dd {
+	margin: 2px 0 0;
+	font: 600 15px var(--mono);
+	font-variant-numeric: tabular-nums;
+}
+
+.chart-controls {
+	display: flex;
+	justify-content: space-between;
+	gap: 8px;
+	flex-wrap: wrap;
+	margin-top: 18px;
+}
+.folio-value .chart {
+	margin-bottom: 8px;
+}
+.readout-strong {
+	color: var(--text);
+	font-weight: 600;
+}
+.value-chart .line {
+	fill: none;
+	stroke-width: 2;
+	stroke-linejoin: round;
+	stroke: var(--trend);
+}
+.value-chart {
+	--trend: var(--muted);
+}
+.value-chart.up {
+	--trend: var(--up);
+}
+.value-chart.down {
+	--trend: var(--down);
+}
+.value-chart .fill-top {
+	stop-color: var(--trend);
+	stop-opacity: 0.22;
+}
+.value-chart .fill-bottom {
+	stop-color: var(--trend);
+	stop-opacity: 0;
+}
+.value-chart .baseline {
+	stroke: var(--muted);
+	stroke-dasharray: 2 4;
+	opacity: 0.7;
+}
+.value-chart .dot {
+	fill: var(--trend);
+	stroke: var(--panel);
+	stroke-width: 2;
+}
+
+/* Allocation donut */
+
+.folio-alloc .panel-title {
+	margin-bottom: 12px;
+}
+.alloc {
+	display: flex;
+	flex-direction: column;
+	align-items: center;
+	gap: 16px;
+}
+.donut {
+	position: relative;
+}
+.donut svg {
+	display: block;
+}
+.donut .slice {
+	fill: none;
+	cursor: default;
+	transition:
+		stroke-width 120ms ease-out,
+		opacity 120ms ease-out;
+}
+.donut .slice.dim {
+	opacity: 0.45;
+}
+.donut-center {
+	position: absolute;
+	inset: 0;
+	display: flex;
+	flex-direction: column;
+	align-items: center;
+	justify-content: center;
+	pointer-events: none;
+	text-align: center;
+}
+.donut-center span {
+	color: var(--muted);
+	font-size: 12px;
+}
+.donut-center b {
+	font: 600 18px var(--mono);
+	font-variant-numeric: tabular-nums;
+}
+.donut-center small {
+	color: var(--muted);
+	font: 12px var(--mono);
+}
+
+.legend {
+	align-self: stretch;
+	list-style: none;
+	margin: 0;
+	padding: 0;
+}
+.legend li {
+	display: grid;
+	grid-template-columns: 10px minmax(0, 1fr) auto auto;
+	align-items: center;
+	gap: 10px;
+	padding: 7px 8px;
+	border-radius: 7px;
+}
+.legend li.on {
+	background: var(--panel-2);
+}
+.legend i,
+.asset i {
+	width: 10px;
+	height: 10px;
+	border-radius: 3px;
+}
+.legend-name {
+	display: flex;
+	flex-direction: column;
+	min-width: 0;
+}
+.legend-name b {
+	font: 600 13px var(--mono);
+}
+.legend-name small,
+.asset small {
+	color: var(--muted);
+	font: 12px var(--sans);
+	white-space: nowrap;
+	overflow: hidden;
+	text-overflow: ellipsis;
+}
+.legend-pct,
+.legend-val {
+	font: 13px var(--mono);
+	font-variant-numeric: tabular-nums;
+	text-align: right;
+}
+.legend-val {
+	min-width: 92px;
+	color: var(--muted);
+}
+
+/* Holdings */
+
+.holdings-head {
+	display: flex;
+	justify-content: space-between;
+	align-items: center;
+	gap: 8px;
+	margin-bottom: 8px;
+}
+.table-scroll {
+	overflow-x: auto;
+}
+.holdings td {
+	vertical-align: middle;
+}
+.asset {
+	display: flex;
+	align-items: center;
+	gap: 10px;
+}
+.asset > span {
+	display: flex;
+	flex-direction: column;
+	min-width: 0;
+}
+.holdings .sub {
+	display: block;
+	font-size: 12px;
+}
+.holdings td:not(.up):not(.down) .sub {
+	color: var(--muted);
+}
+.weight {
+	display: block;
+	width: 72px;
+	height: 4px;
+	margin: 5px 0 0 auto;
+	border-radius: 2px;
+	background: var(--panel-2);
+	overflow: hidden;
+}
+.weight span {
+	display: block;
+	height: 100%;
+	border-radius: 2px;
+}
+
+.folio-signin {
+	display: flex;
+	flex-direction: column;
+	align-items: center;
+	gap: 16px;
+	padding-top: 48px;
+}
+.folio-signin .side {
+	width: min(360px, 100%);
+	position: static;
+}
+
+@media (max-width: 1100px) {
+	.folio {
+		grid-template-columns: minmax(0, 1fr);
+	}
+	.alloc {
+		flex-direction: row;
+		flex-wrap: wrap;
+		justify-content: center;
+		align-items: center;
+	}
+	.legend {
+		flex: 1 1 280px;
+		align-self: center;
+	}
+}
+
+@media (max-width: 760px) {
+	.folio-stats {
+		gap: 20px;
+		flex-wrap: wrap;
+	}
+	.hero {
+		font-size: 28px;
+	}
 }
 
 /* Narrower screens: the ticket moves under the chart, then everything stacks. */

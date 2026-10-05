@@ -4,17 +4,19 @@ import type { Api, Candle, Fill, Interval, Portfolio, Trade } from './api';
 import { AuthPanel } from './components/AuthPanel';
 import { Chart } from './components/Chart';
 import { Markets } from './components/Markets';
+import { Portfolio as PortfolioPage } from './components/Portfolio';
 import { Fills, Positions, Tape } from './components/Tables';
 import { Ticket } from './components/Ticket';
 import { money, percent, shares, signedMoney, trendClass } from './format';
-import { useHashSymbol, useNow, usePrices, useSession } from './hooks';
+import { useNow, usePrices, useRoute, useSession } from './hooks';
 
 const INTERVALS: Interval[] = ['1m', '5m', '15m', '1h', '1d'];
 
 export function App({ api }: { api: Api }) {
 	const { snapshot, offline } = usePrices(api);
 	const [session, setSession] = useSession(api);
-	const [hashSymbol, select] = useHashSymbol();
+	const route = useRoute();
+	const { select } = route;
 	const [interval, setCandleInterval] = useState<Interval>('1m');
 	const [candles, setCandles] = useState<Candle[] | null>(null);
 	const [tape, setTape] = useState<Trade[]>([]);
@@ -24,20 +26,21 @@ export function App({ api }: { api: Api }) {
 	const now = useNow(250);
 
 	const prices = useMemo(() => new Map(snapshot?.prices.map((p) => [p.symbol, p])), [snapshot]);
-	const symbol = prices.has(hashSymbol) ? hashSymbol : (snapshot?.prices[0]?.symbol ?? '');
+	const symbol = prices.has(route.symbol) ? route.symbol : (snapshot?.prices[0]?.symbol ?? '');
+	const onPortfolio = route.page === 'portfolio';
 	const price = prices.get(symbol);
 	const tick = snapshot?.tick;
 
 	// Chart and tape follow the selected symbol and refresh every auction.
 	useEffect(() => {
-		if (!symbol) return;
+		if (!symbol || onPortfolio) return;
 		let live = true;
 		api.candles(symbol, interval).then((c) => live && setCandles(c), () => {});
 		api.trades(symbol).then((t) => live && setTape(t), () => {});
 		return () => {
 			live = false;
 		};
-	}, [api, symbol, interval, tick]);
+	}, [api, symbol, interval, tick, onPortfolio]);
 
 	// Clear the chart only when switching what it shows, not on each refresh.
 	useEffect(() => setCandles(null), [symbol, interval]);
@@ -72,6 +75,14 @@ export function App({ api }: { api: Api }) {
 					<b>t3</b>
 					<span>virtual stock market</span>
 				</a>
+				<nav class="pages" aria-label="Pages">
+					<a href={`#/${encodeURIComponent(symbol)}`} aria-current={onPortfolio ? undefined : 'page'}>
+						Trade
+					</a>
+					<a href="#/portfolio" aria-current={onPortfolio ? 'page' : undefined}>
+						Portfolio
+					</a>
+				</nav>
 				<div class="auction" title="Orders are matched in a batch auction at every tick.">
 					{offline ? (
 						<span class="status-off">Market unreachable · retrying</span>
@@ -97,7 +108,8 @@ export function App({ api }: { api: Api }) {
 				)}
 			</header>
 
-			{portfolio && (
+			{/* The portfolio page has its own, fuller summary. */}
+			{portfolio && !onPortfolio && (
 				<section class="summary" aria-label="Account summary">
 					<Stat label="Account value" value={money(portfolio.total_value)} big />
 					<Stat label="Cash available" value={money(portfolio.cash - portfolio.cash_held)} />
@@ -106,7 +118,25 @@ export function App({ api }: { api: Api }) {
 				</section>
 			)}
 
-			{snapshot && (
+			{snapshot && onPortfolio ? (
+				session && portfolio ? (
+					<PortfolioPage
+						api={api}
+						portfolio={portfolio}
+						prices={prices}
+						symbols={snapshot.prices.map((p) => p.symbol)}
+						tick={snapshot.tick}
+						onSelect={(s) => route.open('trade', s)}
+					/>
+				) : !session ? (
+					<main class="folio-signin">
+						<p class="muted">Sign in to see your portfolio.</p>
+						<div class="side">
+							<AuthPanel api={api} onSession={setSession} />
+						</div>
+					</main>
+				) : null
+			) : snapshot && (
 				<main class="desk">
 					<Markets prices={snapshot.prices} selected={symbol} onSelect={select} />
 

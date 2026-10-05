@@ -83,6 +83,23 @@ func (g *Gateway) getAccountTrades(w http.ResponseWriter, r *http.Request, u *Us
 	return nil
 }
 
+func (g *Gateway) getAccountHistory(w http.ResponseWriter, r *http.Request, u *User) error {
+	limit, err := limitParam(r)
+	if err != nil {
+		return err
+	}
+	name, interval, err := intervalParam(r)
+	if err != nil {
+		return err
+	}
+	candles, err := g.reports.AccountHistory(u.ID, interval, limit)
+	if err != nil {
+		return err
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"interval": name, "candles": candles})
+	return nil
+}
+
 // orderRequest is the public order shape. ID, account and sequence are
 // never taken from the client.
 type orderRequest struct {
@@ -203,6 +220,19 @@ var candleIntervals = map[string]time.Duration{
 	"1h": time.Hour, "1d": 24 * time.Hour,
 }
 
+// intervalParam reads the candle interval, which defaults to 1m.
+func intervalParam(r *http.Request) (string, time.Duration, error) {
+	name := r.URL.Query().Get("interval")
+	if name == "" {
+		name = "1m"
+	}
+	interval, ok := candleIntervals[name]
+	if !ok {
+		return "", 0, apiError{http.StatusBadRequest, "invalid_interval", "interval must be one of 1m, 5m, 15m, 1h, 1d"}
+	}
+	return name, interval, nil
+}
+
 func (g *Gateway) getCandles(w http.ResponseWriter, r *http.Request, _ *User) error {
 	sym, err := g.symbol(r)
 	if err != nil {
@@ -212,13 +242,9 @@ func (g *Gateway) getCandles(w http.ResponseWriter, r *http.Request, _ *User) er
 	if err != nil {
 		return err
 	}
-	name := r.URL.Query().Get("interval")
-	if name == "" {
-		name = "1m"
-	}
-	interval, ok := candleIntervals[name]
-	if !ok {
-		return apiError{http.StatusBadRequest, "invalid_interval", "interval must be one of 1m, 5m, 15m, 1h, 1d"}
+	name, interval, err := intervalParam(r)
+	if err != nil {
+		return err
 	}
 	candles, err := g.reports.Candles(sym, interval, limit)
 	if err != nil {

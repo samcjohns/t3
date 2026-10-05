@@ -52,6 +52,7 @@ type Reports interface {
 	AccountTrades(accountID string, limit int) []reporting.AccountTrade
 	Candles(symbol string, interval time.Duration, limit int) ([]reporting.Candle, error)
 	Portfolio(accountID string) (reporting.Portfolio, error)
+	AccountHistory(accountID string, interval time.Duration, limit int) ([]reporting.ValueCandle, error)
 	Prices() *reporting.PriceBlob
 }
 
@@ -171,6 +172,7 @@ func (g *Gateway) routes() {
 	g.handle("GET /v1/account", trader, g.getAccount)
 	g.handle("GET /v1/account/portfolio", trader, g.getPortfolio)
 	g.handle("GET /v1/account/trades", trader, g.getAccountTrades)
+	g.handle("GET /v1/account/history", trader, g.getAccountHistory)
 	g.handle("POST /v1/orders", trader, g.placeOrder)
 
 	g.handle("GET /v1/market/symbols", public, g.listSymbols)

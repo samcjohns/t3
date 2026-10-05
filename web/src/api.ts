@@ -67,6 +67,17 @@ export interface Position {
 	held: number;
 	last_price: number;
 	value: number;
+	/** What the shares cost at their average purchase price, or null if some predate the trade history. */
+	cost_basis: number | null;
+}
+
+/** An account's total value (cash plus holdings) over one candle period. */
+export interface ValueCandle {
+	start: string;
+	open: number;
+	high: number;
+	low: number;
+	close: number;
 }
 
 export interface Portfolio {
@@ -169,6 +180,9 @@ export class Api {
 	}
 	async fills(limit = 100) {
 		return (await this.request<{ trades: Fill[] }>('GET', `/v1/account/trades?limit=${limit}`)).trades;
+	}
+	async history(interval: Interval, limit = 120) {
+		return (await this.request<{ candles: ValueCandle[] }>('GET', `/v1/account/history?interval=${interval}&limit=${limit}`)).candles;
 	}
 	placeOrder(order: OrderRequest) {
 		return this.request<Order>('POST', '/v1/orders', order);

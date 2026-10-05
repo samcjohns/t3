@@ -76,6 +76,20 @@ type Position struct {
 	Held      int64  `json:"held"`
 	LastPrice int64  `json:"last_price"`
 	Value     int64  `json:"value"`
+	// CostBasis is what the shares cost, at their average purchase price. It
+	// is nil when some of them predate the retained trade history, such as
+	// deposited shares, so their cost is unknown.
+	CostBasis *int64 `json:"cost_basis"`
+}
+
+// ValueCandle summarises an account's total value (cash plus holdings at
+// last prices) over [Start, Start+interval).
+type ValueCandle struct {
+	Start time.Time `json:"start"`
+	Open  int64     `json:"open"`
+	High  int64     `json:"high"`
+	Low   int64     `json:"low"`
+	Close int64     `json:"close"`
 }
 
 // Portfolio is an account's balances valued at last prices.
@@ -150,6 +164,7 @@ type Service struct {
 	maxSymbol, maxAcct int
 	mu                 sync.RWMutex
 	lastTick           uint64
+	lastTime           time.Time
 	quotes             map[string]Quote
 	trades             map[string][]Trade
 	accountTrades      map[string][]AccountTrade
@@ -222,6 +237,7 @@ func (s *Service) Ingest(tr engine.TickResult) {
 		return
 	}
 	s.lastTick = tr.Tick
+	s.lastTime = tr.Timestamp
 
 	day := tr.Timestamp.UTC().Truncate(24 * time.Hour)
 	for _, d := range s.days {
@@ -384,15 +400,212 @@ func (s *Service) Portfolio(accountID string) (Portfolio, error) {
 	}
 	s.mu.RLock()
 	quotes := maps.Clone(s.quotes)
+	trades := slices.Clone(s.accountTrades[accountID])
 	s.mu.RUnlock()
 
+	basis := costBasis(holdingsBefore(acct, trades), trades)
 	p := Portfolio{AccountID: acct.ID, Cash: acct.Cash, CashHeld: acct.CashHeld, Positions: []Position{}}
 	for _, h := range acct.Holdings {
 		last := quotes[h.Symbol].LastPrice
 		pos := Position{Symbol: h.Symbol, Quantity: h.Quantity, Held: h.Held, LastPrice: last, Value: last * h.Quantity}
+		if b, ok := basis[h.Symbol]; ok && b.known && b.quantity == h.Quantity {
+			pos.CostBasis = &b.cost
+		}
 		p.Positions = append(p.Positions, pos)
 		p.MarketValue += pos.Value
 	}
 	p.TotalValue = p.Cash + p.MarketValue
 	return p, nil
+}
+
+// holdingsBefore rewinds an account's current share counts past trades
+// (oldest first), giving the holdings just before the first of them.
+func holdingsBefore(acct ledger.Account, trades []AccountTrade) map[string]int64 {
+	shares := make(map[string]int64, len(acct.Holdings))
+	for _, h := range acct.Holdings {
+		shares[h.Symbol] = h.Quantity
+	}
+	for _, t := range trades {
+		shares[t.Symbol] -= signedQuantity(t)
+	}
+	return shares
+}
+
+func signedQuantity(t AccountTrade) int64 {
+	if t.Direction == engine.Sell {
+		return -t.Quantity
+	}
+	return t.Quantity
+}
+
+type basisState struct {
+	quantity, cost int64
+	known          bool
+}
+
+// costBasis replays trades (oldest first) from the given starting holdings,
+// tracking each symbol's cost at its average purchase price. Shares held at
+// the start have no known cost, so their symbol's basis stays unknown until
+// the position is closed out.
+func costBasis(start map[string]int64, trades []AccountTrade) map[string]*basisState {
+	out := make(map[string]*basisState)
+	for sym, q := range start {
+		out[sym] = &basisState{quantity: q, known: q == 0}
+	}
+	for _, t := range trades {
+		b := out[t.Symbol]
+		if b == nil {
+			b = &basisState{known: true}
+			out[t.Symbol] = b
+		}
+		if t.Direction == engine.Buy {
+			b.cost += t.Price * t.Quantity
+			b.quantity += t.Quantity
+		} else {
+			// Selling leaves the average cost of the remaining shares unchanged.
+			if b.quantity > 0 {
+				b.cost -= b.cost * min(t.Quantity, b.quantity) / b.quantity
+			}
+			b.quantity -= t.Quantity
+		}
+		if b.quantity <= 0 {
+			*b = basisState{quantity: b.quantity, known: b.quantity == 0}
+		}
+	}
+	return out
+}
+
+// AccountHistory returns up to limit of an account's most recent value
+// candles at interval, oldest first, ending with the period of the latest
+// tick. Every period appears, so periods without changes are flat.
+//
+// History is rebuilt by rewinding the account's current balances through its
+// retained trades, and starts at the oldest of them. Values are sampled once
+// a minute, at each symbol's closing price for that minute, so High and Low
+// are within that resolution. Deposits are not trades, so they appear to have
+// been there from the start.
+func (s *Service) AccountHistory(accountID string, interval time.Duration, limit int) ([]ValueCandle, error) {
+	if interval <= 0 || interval%CandleBase != 0 {
+		return nil, fmt.Errorf("%w: %v", ErrInvalidInterval, interval)
+	}
+	acct, err := s.accounts.Account(accountID)
+	if err != nil {
+		return nil, err
+	}
+
+	s.mu.RLock()
+	end := s.lastTime
+	trades := slices.Clone(s.accountTrades[accountID])
+	s.mu.RUnlock()
+	out := []ValueCandle{}
+	if end.IsZero() {
+		return out, nil
+	}
+
+	last := end.UTC().Truncate(interval)
+	first := last
+	if len(trades) > 0 {
+		first = trades[0].Time.UTC().Truncate(CandleBase).Truncate(interval)
+	}
+	if limit > 0 {
+		first = maxTime(first, last.Add(-time.Duration(limit-1)*interval))
+	}
+
+	// Rewind the balances to the start of the window.
+	cash := acct.Cash
+	shares := make(map[string]int64)
+	for _, h := range acct.Holdings {
+		shares[h.Symbol] = h.Quantity
+	}
+	from := len(trades)
+	for from > 0 && !trades[from-1].Time.UTC().Truncate(CandleBase).Before(first) {
+		from--
+		t := trades[from]
+		shares[t.Symbol] -= signedQuantity(t)
+		cash += signedQuantity(t) * t.Price
+	}
+	trades = trades[from:]
+
+	// Each symbol ever held in the window: its price at the window start, and
+	// its later one-minute closes.
+	type series struct {
+		price   int64
+		candles []Candle
+	}
+	held := make(map[string]*series)
+	s.mu.RLock()
+	for sym := range shares {
+		cs := s.candles[sym]
+		i, _ := slices.BinarySearchFunc(cs, first, func(c Candle, t time.Time) int { return c.Start.Compare(t) })
+		sr := &series{candles: slices.Clone(cs[i:])}
+		if i > 0 {
+			sr.price = cs[i-1].Close
+		}
+		held[sym] = sr
+	}
+	s.mu.RUnlock()
+
+	value := func() int64 {
+		v := cash
+		for sym, sr := range held {
+			v += shares[sym] * sr.price
+		}
+		return v
+	}
+
+	v := value()
+	cur := ValueCandle{Start: first, Open: v, High: v, Low: v, Close: v}
+	for {
+		// The next minute in which a price or a holding changed.
+		next, ok := time.Time{}, false
+		consider := func(t time.Time) {
+			if !ok || t.Before(next) {
+				next, ok = t, true
+			}
+		}
+		for _, sr := range held {
+			if len(sr.candles) > 0 {
+				consider(sr.candles[0].Start)
+			}
+		}
+		if len(trades) > 0 {
+			consider(trades[0].Time.UTC().Truncate(CandleBase))
+		}
+		if !ok || next.Truncate(interval).After(last) {
+			break
+		}
+
+		for bucket := next.Truncate(interval); cur.Start.Before(bucket); {
+			out = append(out, cur)
+			cur = ValueCandle{Start: cur.Start.Add(interval), Open: v, High: v, Low: v, Close: v}
+		}
+		for _, sr := range held {
+			for len(sr.candles) > 0 && sr.candles[0].Start.Equal(next) {
+				sr.price = sr.candles[0].Close
+				sr.candles = sr.candles[1:]
+			}
+		}
+		for len(trades) > 0 && trades[0].Time.UTC().Truncate(CandleBase).Equal(next) {
+			t := trades[0]
+			shares[t.Symbol] += signedQuantity(t)
+			cash -= signedQuantity(t) * t.Price
+			trades = trades[1:]
+		}
+		v = value()
+		cur.High, cur.Low, cur.Close = max(cur.High, v), min(cur.Low, v), v
+	}
+	for {
+		out = append(out, cur)
+		if !cur.Start.Before(last) {
+			return out, nil
+		}
+		cur = ValueCandle{Start: cur.Start.Add(interval), Open: v, High: v, Low: v, Close: v}
+	}
+}
+
+func maxTime(a, b time.Time) time.Time {
+	if a.After(b) {
+		return a
+	}
+	return b
 }

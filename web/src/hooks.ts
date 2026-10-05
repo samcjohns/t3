@@ -105,18 +105,31 @@ export function useSession(api: Api) {
 	return [session, setSession] as const;
 }
 
-/** The symbol in the URL hash (#/ACME), so a selection survives reloads and can be linked. */
-export function useHashSymbol(): [string, (s: string) => void] {
-	const read = () => decodeURIComponent(location.hash.replace(/^#\/?/, '')).toUpperCase();
-	const [symbol, setSymbol] = useState(read);
+export type Page = 'trade' | 'portfolio';
+
+/**
+ * The page and symbol in the URL hash: #/ACME for a symbol's trading view, or
+ * #/portfolio. Both survive reloads and can be linked.
+ */
+export function useRoute() {
+	const read = () => {
+		const path = decodeURIComponent(location.hash.replace(/^#\/?/, ''));
+		return path === 'portfolio' ? { page: 'portfolio' as Page, symbol: '' } : { page: 'trade' as Page, symbol: path.toUpperCase() };
+	};
+	const [route, setRoute] = useState(read);
 	useEffect(() => {
-		const onHash = () => setSymbol(read());
+		const onHash = () => setRoute(read());
 		addEventListener('hashchange', onHash);
 		return () => removeEventListener('hashchange', onHash);
 	}, []);
+	/** Switches symbol within the trading view, without adding history entries. */
 	const select = useCallback((s: string) => {
 		history.replaceState(null, '', `#/${encodeURIComponent(s)}`);
-		setSymbol(s);
+		setRoute({ page: 'trade', symbol: s });
 	}, []);
-	return [symbol, select];
+	/** Moves between pages, so the back button returns. */
+	const open = useCallback((page: Page, symbol = '') => {
+		location.hash = page === 'portfolio' ? '#/portfolio' : `#/${encodeURIComponent(symbol)}`;
+	}, []);
+	return { ...route, select, open };
 }

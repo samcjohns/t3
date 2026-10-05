@@ -18,8 +18,9 @@ The API gateway is the only public entry point. All bodies are JSON. Money is in
 | `POST /v1/auth/login` | — | `{username, password}` → `{token, expires_at, user}` |
 | `POST /v1/auth/logout` | trader | Revokes the token → `204` |
 | `GET /v1/account` | trader | Ledger balances and holdings, including the amounts held. |
-| `GET /v1/account/portfolio` | trader | Holdings valued at last prices. |
+| `GET /v1/account/portfolio` | trader | Holdings valued at last prices. Each position's `cost_basis` is what its shares cost at their average purchase price, or `null` if some predate the retained trade history (such as deposited shares). |
 | `GET /v1/account/trades?limit=` | trader | Your own fills, newest first. |
+| `GET /v1/account/history?interval=&limit=` | trader | Your account's total value (cash plus holdings at last prices) as `open`/`high`/`low`/`close` candles, oldest first, with the same `interval` options as market candles. See below. |
 | `POST /v1/orders` | trader | Places an order, returning `202` with the accepted order. See below. |
 | `GET /v1/market/symbols` | — | The tradable symbols, each with `name` and `reference_price`. |
 | `GET /v1/market/prices` | — | Every symbol's current price, as one pre-built snapshot that changes once per tick. It supports `ETag`/`If-None-Match`, which returns `304` while unchanged. |
@@ -43,6 +44,10 @@ The API gateway is the only public entry point. All bodies are JSON. Money is in
 The gateway reserves the order's funding with the ledger before the engine sees the order. If the engine rejects it, the hold is released. The order fills at the next heartbeat.
 
 Order entry returns `503 market_halted` if the ledger falls more than 3 ticks behind the engine, because fills could no longer be settled. Market data stays available.
+
+## Account history
+
+History is rebuilt by rewinding the account's current balances through its fills, so it starts at the oldest retained fill and ends with the period of the latest tick. Every period in between appears, flat if nothing changed. Values are sampled once a minute at each symbol's closing price, so `high` and `low` are accurate to that resolution. Deposits are not fills, so they appear to have been there from the start.
 
 ## Error codes
 
@@ -107,7 +112,7 @@ T3_ADMIN_PASSWORD=change-me go run ./cmd/server
 
 ## Web app
 
-`web/` is the browser client: a Preact single-page app, built by Vite and served by nginx in the `t3-web` container. Anyone can browse prices, charts and the tape. Signed-in traders also see their account value, positions and fills, and can place orders. It talks only to the public API above.
+`web/` is the browser client: a Preact single-page app, built by Vite and served by nginx in the `t3-web` container. Anyone can browse prices, charts and the tape. Signed-in traders also see their account value, positions and fills, and can place orders. The Portfolio page (`#/portfolio`) charts their account value over time, shows their allocation, and lists each holding with its return against its average cost. It talks only to the public API above.
 
 The container reads `T3_API_URL` at startup and serves it to the app as `/config.json`, and also allows it in the page's Content Security Policy, so one image works for any deployment. Compose sets it from `T3_PUBLIC_API_URL`.
 

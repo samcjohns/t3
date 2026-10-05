@@ -271,6 +271,15 @@ func TestTradingEndToEnd(t *testing.T) {
 	if num(p.body["cash"]) != 89_950 || num(p.body["market_value"]) != 10_050 || num(p.body["total_value"]) != 100_000 {
 		t.Fatalf("portfolio = %v", p.body)
 	}
+	if pos := p.body["positions"].([]any)[0].(map[string]any); num(pos["cost_basis"]) != 10_050 {
+		t.Fatalf("position = %v", pos)
+	}
+	hist := e.expect(e.do("GET", "/v1/account/history?interval=5m", alice, nil), http.StatusOK)
+	if cs := hist.body["candles"].([]any); len(cs) != 1 || num(cs[0].(map[string]any)["close"]) != 100_000 {
+		t.Fatalf("history = %v", hist.body)
+	}
+	e.expect(e.do("GET", "/v1/account/history?interval=2m", alice, nil), http.StatusBadRequest)
+	e.expect(e.do("GET", "/v1/account/history", "", nil), http.StatusUnauthorized)
 	mine := e.expect(e.do("GET", "/v1/account/trades", bob, nil), http.StatusOK)
 	if ts := mine.body["trades"].([]any); len(ts) != 1 || ts[0].(map[string]any)["direction"] != "SELL" {
 		t.Fatalf("bob's trades = %v", mine.body)

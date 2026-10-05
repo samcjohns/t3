@@ -12,6 +12,11 @@ export const shares = (n: number) => count.format(n);
 
 export const percent = (change: number, base: number) => (base ? pct.format(change / base) : '—');
 
+const portion = new Intl.NumberFormat('en-US', { style: 'percent', minimumFractionDigits: 1, maximumFractionDigits: 1 });
+
+/** A part of a whole, unsigned, e.g. "12.5%". */
+export const share = (part: number, whole: number) => (whole ? portion.format(part / whole) : '—');
+
 export const trendClass = (n: number) => (n > 0 ? 'up' : n < 0 ? 'down' : '');
 
 /**
@@ -32,4 +37,19 @@ export const clock = (iso: string) => new Date(iso).toLocaleTimeString([], { hou
 export function shortTime(iso: string, withDate: boolean) {
 	const d = new Date(iso);
 	return withDate ? d.toLocaleDateString([], { month: 'short', day: 'numeric' }) : d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+}
+
+const compactUsd = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD', notation: 'compact', maximumFractionDigits: 2 });
+const wholeUsd = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD', maximumFractionDigits: 0 });
+
+/**
+ * A formatter for a chart axis spanning lo..hi cents with ticks `step` apart,
+ * so every label on it looks alike and fits: compact from $1M, whole dollars
+ * from $10,000 when ticks are a dollar or more apart, and cents otherwise.
+ */
+export function axisMoney(lo: number, hi: number, step: number) {
+	const top = Math.max(Math.abs(lo), Math.abs(hi));
+	if (top >= 100_000_000) return (c: number) => compactUsd.format(c / 100);
+	if (top >= 1_000_000 && step >= 100) return (c: number) => wholeUsd.format(c / 100);
+	return money;
 }
