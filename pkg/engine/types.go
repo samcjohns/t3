@@ -29,6 +29,18 @@ const (
 	Market OrderType = "MARKET"
 )
 
+// TimeInForce determines how long a limit order stays in the book.
+type TimeInForce string
+
+const (
+	// GTC (good till cancelled) limit orders rest across ticks until
+	// filled. It is the default when TimeInForce is empty.
+	GTC TimeInForce = "GTC"
+	// IOC (immediate or cancel) limit orders take part in one auction; any
+	// unfilled quantity expires, as for market orders.
+	IOC TimeInForce = "IOC"
+)
+
 // Prices are integer minor units (e.g. cents) and quantities are whole
 // shares, so matching never touches floating point.
 
@@ -45,6 +57,9 @@ type Order struct {
 	// MaxCost / clearing price shares. Required for market buys and 0 for
 	// every other order.
 	MaxCost int64 `json:"max_cost"`
+	// TimeInForce applies to limit orders; market orders always expire
+	// after one auction. Empty means GTC.
+	TimeInForce TimeInForce `json:"time_in_force,omitempty"`
 	// Sequence is assigned by the engine on acceptance and is the time
 	// priority tie-breaker. Any value supplied by the caller is overwritten.
 	Sequence uint64 `json:"sequence"`
@@ -138,6 +153,9 @@ func (o Order) Validate() error {
 		}
 	default:
 		return invalid("type must be %q or %q", Limit, Market)
+	}
+	if o.TimeInForce != "" && o.TimeInForce != GTC && o.TimeInForce != IOC {
+		return invalid("time_in_force must be %q or %q", GTC, IOC)
 	}
 	marketBuy := o.Type == Market && o.Direction == Buy
 	switch {

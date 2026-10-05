@@ -201,6 +201,22 @@ func TestMaxCostShiftsClearingPrice(t *testing.T) {
 	}
 }
 
+func TestIOCRemainderExpires(t *testing.T) {
+	ioc := limit("b1", Buy, 10, 1000)
+	ioc.TimeInForce = IOC
+	unfilled := limit("b2", Buy, 5, 900)
+	unfilled.TimeInForce = IOC
+	orders := []Order{ioc, unfilled, limit("s1", Sell, 4, 1000)}
+	r := FBAMatcher{}.Match(orders)
+	checkInvariants(t, orders, r)
+	if r.Volume != 4 || len(r.Resting) != 0 {
+		t.Fatalf("got volume %d resting %+v", r.Volume, r.Resting)
+	}
+	if got := ids(r.Expired); !reflect.DeepEqual(got, []string{"b1", "b2"}) || r.Expired[0].Quantity != 6 {
+		t.Fatalf("expired = %+v", r.Expired)
+	}
+}
+
 func TestTimePriorityAtSamePrice(t *testing.T) {
 	orders := []Order{
 		limit("s1", Sell, 100, 1000),

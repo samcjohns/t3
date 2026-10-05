@@ -99,8 +99,8 @@ Subtasks (in order):
 1. Order submission logs (without sensitive leakage).
 1. Error path logs.
 1. Add lightweight persistence strategy decision.
-1. Define whether state is in-memory only (MVP) or persisted.
-1. If persisted, add adapter interface first, then implementation.
+1. Decided: persisted in PostgreSQL, one schema per container (see `docs/persistence.md`).
+1. Add adapter interface first, then implementation.
 1. Add observability hooks.
 1. Health endpoint readiness/liveness contract.
 1. Basic metrics counters (orders received, ticks processed, fills).

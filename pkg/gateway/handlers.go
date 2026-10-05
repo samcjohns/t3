@@ -1,8 +1,8 @@
 package gateway
 
 import (
+	"context"
 	"net/http"
-	"slices"
 	"strconv"
 	"time"
 
@@ -19,7 +19,7 @@ func (g *Gateway) register(w http.ResponseWriter, r *http.Request, _ *User) erro
 	if err := decodeJSON(w, r, &req); err != nil {
 		return err
 	}
-	u, err := g.CreateUser(req.Username, req.Password, RoleTrader)
+	u, err := g.CreateUser(r.Context(), req.Username, req.Password, RoleTrader)
 	if err != nil {
 		return err
 	}
@@ -32,18 +32,26 @@ func (g *Gateway) login(w http.ResponseWriter, r *http.Request, _ *User) error {
 	if err := decodeJSON(w, r, &req); err != nil {
 		return err
 	}
-	u, err := g.users.authenticate(req.Username, req.Password)
+	u, err := g.auth.authenticate(r.Context(), req.Username, req.Password)
 	if err != nil {
 		return err
 	}
-	token, expires := g.sessions.issue(u)
+	if err := g.ensureAccount(r.Context(), u); err != nil {
+		return err
+	}
+	token, expires, err := g.auth.issue(r.Context(), u)
+	if err != nil {
+		return err
+	}
 	writeJSON(w, http.StatusOK, map[string]any{"token": token, "expires_at": expires, "user": u})
 	return nil
 }
 
 func (g *Gateway) logout(w http.ResponseWriter, r *http.Request, _ *User) error {
 	token, _ := bearerToken(r)
-	g.sessions.revoke(token)
+	if err := g.auth.revoke(r.Context(), token); err != nil {
+		return err
+	}
 	w.WriteHeader(http.StatusNoContent)
 	return nil
 }
@@ -84,6 +92,8 @@ type orderRequest struct {
 	Quantity   int64            `json:"quantity"`
 	LimitPrice int64            `json:"limit_price"`
 	MaxCost    int64            `json:"max_cost"`
+	// TimeInForce is GTC (default) or IOC.
+	TimeInForce engine.TimeInForce `json:"time_in_force"`
 }
 
 type orderResponse struct {
@@ -100,28 +110,34 @@ func (g *Gateway) placeOrder(w http.ResponseWriter, r *http.Request, u *User) er
 		return apiError{http.StatusBadRequest, "invalid_order", "unknown symbol " + strconv.Quote(req.Symbol)}
 	}
 	order := engine.Order{
-		ID:         newID("ord"),
-		AccountID:  u.ID,
-		Symbol:     req.Symbol,
-		Direction:  req.Direction,
-		Type:       req.Type,
-		Quantity:   req.Quantity,
-		LimitPrice: req.LimitPrice,
-		MaxCost:    req.MaxCost,
+		ID:          newID("ord"),
+		AccountID:   u.ID,
+		Symbol:      req.Symbol,
+		Direction:   req.Direction,
+		Type:        req.Type,
+		Quantity:    req.Quantity,
+		LimitPrice:  req.LimitPrice,
+		MaxCost:     req.MaxCost,
+		TimeInForce: req.TimeInForce,
 	}
 	if err := order.Validate(); err != nil {
+		return err
+	}
+	if err := g.halted(); err != nil {
 		return err
 	}
 
 	// Funding is reserved before the engine sees the order, so a fill can
 	// never overdraw the account.
-	if err := g.ledger.Reserve(order); err != nil {
+	if err := g.ledger.Reserve(r.Context(), order); err != nil {
 		g.metrics.inc(`t3_gateway_orders_total{result="rejected"}`)
 		return err
 	}
-	accepted, err := g.market.Submit(order)
+	accepted, err := g.market.Submit(r.Context(), order)
 	if err != nil {
-		if relErr := g.ledger.Release(order.ID); relErr != nil {
+		// Release even if the client went away, or the hold would linger
+		// until reconciliation.
+		if relErr := g.ledger.Release(context.WithoutCancel(r.Context()), order.ID); relErr != nil {
 			g.log.Error("releasing hold for rejected order", "order_id", order.ID, "err", relErr)
 		}
 		g.metrics.inc(`t3_gateway_orders_total{result="rejected"}`)
@@ -135,7 +151,16 @@ func (g *Gateway) placeOrder(w http.ResponseWriter, r *http.Request, u *User) er
 }
 
 func (g *Gateway) listSymbols(w http.ResponseWriter, _ *http.Request, _ *User) error {
-	writeJSON(w, http.StatusOK, map[string]any{"symbols": slices.Sorted(slices.Values(g.cfg.Symbols))})
+	type symbol struct {
+		Symbol         string `json:"symbol"`
+		Name           string `json:"name"`
+		ReferencePrice int64  `json:"reference_price"`
+	}
+	out := make([]symbol, len(g.cfg.Tickers))
+	for i, t := range g.cfg.Tickers {
+		out[i] = symbol{t.Symbol, t.Name, t.ReferencePrice}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"symbols": out})
 	return nil
 }
 
@@ -211,7 +236,7 @@ func (g *Gateway) depositCash(w http.ResponseWriter, r *http.Request, u *User) e
 		return err
 	}
 	id := r.PathValue("id")
-	if err := g.ledger.Deposit(id, req.Amount); err != nil {
+	if err := g.ledger.Deposit(r.Context(), id, req.Amount, ""); err != nil {
 		return err
 	}
 	g.log.Info("admin cash deposit", "admin_id", u.ID, "account_id", id, "amount", req.Amount)
@@ -230,7 +255,7 @@ func (g *Gateway) depositShares(w http.ResponseWriter, r *http.Request, u *User)
 		return badRequest("unknown symbol %q", req.Symbol)
 	}
 	id := r.PathValue("id")
-	if err := g.ledger.DepositShares(id, req.Symbol, req.Quantity); err != nil {
+	if err := g.ledger.DepositShares(r.Context(), id, req.Symbol, req.Quantity, ""); err != nil {
 		return err
 	}
 	g.log.Info("admin share deposit", "admin_id", u.ID, "account_id", id, "symbol", req.Symbol, "quantity", req.Quantity)

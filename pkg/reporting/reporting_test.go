@@ -1,6 +1,8 @@
 package reporting
 
 import (
+	"context"
+	"encoding/json"
 	"errors"
 	"reflect"
 	"testing"
@@ -8,6 +10,7 @@ import (
 
 	"github.com/samcjohns/t3/pkg/engine"
 	"github.com/samcjohns/t3/pkg/ledger"
+	"github.com/samcjohns/t3/pkg/listing"
 )
 
 var t0 = time.Date(2026, 10, 4, 12, 0, 0, 0, time.UTC)
@@ -145,10 +148,10 @@ func TestCandles(t *testing.T) {
 
 func TestPortfolio(t *testing.T) {
 	l := ledger.New()
-	must(t, l.OpenAccount("alice"))
-	must(t, l.Deposit("alice", 50_000))
-	must(t, l.DepositShares("alice", "ACME", 10))
-	must(t, l.DepositShares("alice", "NEW", 4))
+	must(t, l.OpenAccount(context.Background(), "alice"))
+	must(t, l.Deposit(context.Background(), "alice", 50_000, ""))
+	must(t, l.DepositShares(context.Background(), "alice", "ACME", 10, ""))
+	must(t, l.DepositShares(context.Background(), "alice", "NEW", 4, ""))
 
 	s := New(l, Config{})
 	s.Ingest(tick(1, t0, book("ACME", 1200, 1)))
@@ -176,4 +179,73 @@ func must(t *testing.T, err error) {
 	if err != nil {
 		t.Fatal(err)
 	}
+}
+
+type tickSource []engine.TickResult
+
+func (s tickSource) TicksAfter(_ context.Context, after uint64, limit int) ([]engine.TickResult, error) {
+	var out []engine.TickResult
+	for _, tr := range s {
+		if tr.Tick > after && len(out) < limit {
+			out = append(out, tr)
+		}
+	}
+	return out, nil
+}
+
+func TestReplay(t *testing.T) {
+	var src tickSource
+	for i := range uint64(2500) {
+		src = append(src, tick(i+1, t0.Add(time.Duration(i)*10*time.Second), book("ACME", 1000+int64(i%7), 1)))
+	}
+	s := New(nil, Config{})
+	must(t, s.Replay(context.Background(), src))
+	q, _ := s.Quote("ACME")
+	if q.LastTick != 2500 || len(s.Trades("ACME", 0)) != 1000 {
+		t.Fatalf("after replay: quote %+v, %d trades", q, len(s.Trades("ACME", 0)))
+	}
+}
+
+func TestPriceSnapshot(t *testing.T) {
+	tickers := []listing.Ticker{{Symbol: "ACME", Name: "Acme", ReferencePrice: 1000}, {Symbol: "ZED", Name: "Zed", ReferencePrice: 500}}
+	s := New(nil, Config{Listing: tickers, Heartbeat: 10 * time.Second})
+	decode := func() PriceSnapshot {
+		var p PriceSnapshot
+		if err := json.Unmarshal(s.Prices().JSON, &p); err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+
+	p := decode()
+	if p.Tick != 0 || p.Prices[0].Price != 1000 || p.Prices[1].PreviousClose != 500 || s.Prices().ETag != `"t0"` {
+		t.Fatalf("initial snapshot = %+v", p)
+	}
+
+	s.Ingest(tick(1, t0, book("ACME", 1100, 3)))
+	s.Ingest(tick(2, t0.Add(10*time.Second), book("ACME", 1150, 2)))
+	p = decode()
+	want := Price{Symbol: "ACME", Name: "Acme", Price: 1150, PreviousClose: 1000, Change: 150, Volume: 5, LastTradeTick: 2}
+	if p.Tick != 2 || p.Prices[0] != want || !p.NextTickAt.Equal(t0.Add(20*time.Second)) || s.Prices().ETag != `"t2"` {
+		t.Fatalf("snapshot = %+v", p)
+	}
+	if p.Prices[1].Price != 500 || p.Prices[1].LastTradeTick != 0 {
+		t.Fatalf("untraded symbol = %+v", p.Prices[1])
+	}
+
+	// A new UTC day rolls the close forward and resets volume.
+	s.Ingest(tick(3, t0.Add(24*time.Hour), engine.BookResult{Symbol: "ACME"}))
+	if got := decode().Prices[0]; got.PreviousClose != 1150 || got.Change != 0 || got.Volume != 0 {
+		t.Fatalf("after day roll = %+v", got)
+	}
+}
+
+func BenchmarkPrices(b *testing.B) {
+	s := New(nil, Config{Listing: listing.Default()})
+	s.Ingest(tick(1, t0, book("ACME", 1100, 3)))
+	b.RunParallel(func(pb *testing.PB) {
+		for pb.Next() {
+			_ = s.Prices()
+		}
+	})
 }

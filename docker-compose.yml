@@ -1,0 +1,52 @@
+# Local development stack. Passwords default to development values; override
+# them with environment variables for anything shared.
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: t3
+      POSTGRES_PASSWORD: ${T3_POSTGRES_PASSWORD:-postgres-dev}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./deploy/postgres/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "postgres", "-d", "t3"]
+      interval: 2s
+      retries: 30
+
+  server:
+    build: { context: ., target: server }
+    depends_on:
+      postgres: { condition: service_healthy }
+    ports:
+      - "${T3_PORT:-8080}:8080"
+    environment:
+      T3_ENGINE_DATABASE_URL: postgres://t3_engine:engine-dev@postgres:5432/t3?sslmode=disable
+      T3_LEDGER_DATABASE_URL: postgres://t3_ledger:ledger-dev@postgres:5432/t3?sslmode=disable
+      T3_GATEWAY_DATABASE_URL: postgres://t3_gateway:gateway-dev@postgres:5432/t3?sslmode=disable
+      T3_ADMIN_PASSWORD: ${T3_ADMIN_PASSWORD:-admin-dev-password}
+      T3_MARKET_MAKER_PASSWORD: ${T3_MARKET_MAKER_PASSWORD:-maker-dev-password}
+      T3_HEARTBEAT: ${T3_HEARTBEAT:-10s}
+
+  mm-liquidity:
+    build: { context: ., target: marketmaker }
+    depends_on: [server]
+    restart: unless-stopped
+    environment:
+      T3_API_URL: http://server:8080
+      T3_MM_USERNAME: mm-liquidity
+      T3_MM_PASSWORD: ${T3_MARKET_MAKER_PASSWORD:-maker-dev-password}
+      T3_MM_STRATEGY: liquidity
+
+  mm-flow:
+    build: { context: ., target: marketmaker }
+    depends_on: [server]
+    restart: unless-stopped
+    environment:
+      T3_API_URL: http://server:8080
+      T3_MM_USERNAME: mm-flow
+      T3_MM_PASSWORD: ${T3_MARKET_MAKER_PASSWORD:-maker-dev-password}
+      T3_MM_STRATEGY: flow
+
+volumes:
+  pgdata:

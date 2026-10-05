@@ -23,13 +23,14 @@ Submitted by a trusted caller (the API gateway). The engine does no authenticati
   "quantity": 100,
   "limit_price": 1010,
   "max_cost": 0,
+  "time_in_force": "GTC",
   "sequence": 17
 }
 ```
 
 | Field | Rules |
 | --- | --- |
-| `id` | Required. Must be unique among the engine's pending and resting orders. |
+| `id` | Required. Must never be reused; the engine's journal rejects any ID it has seen before. The gateway generates random IDs. |
 | `account_id` | Required. |
 | `symbol` | Required. Each symbol has its own book and auction. |
 | `direction` | `BUY` or `SELL`. |
@@ -37,11 +38,13 @@ Submitted by a trusted caller (the API gateway). The engine does no authenticati
 | `quantity` | Must be greater than 0. |
 | `limit_price` | Must be greater than 0 for `LIMIT` and exactly 0 for `MARKET`. |
 | `max_cost` | Must be greater than 0 for `MARKET` `BUY`, and exactly 0 for every other order. This is the most the order may spend: at clearing price `p` it fills at most `floor(max_cost / p)` shares. |
+| `time_in_force` | `GTC` (good till cancelled; the default when empty or omitted) or `IOC` (immediate or cancel). It only affects limit orders. |
 | `sequence` | Set by the engine when it accepts the order, and used as the time-priority tie-break. Any value sent in is ignored. |
 
 Lifecycle:
 
-- If a `LIMIT` order isn't fully filled, the rest of it stays in the book and joins the next tick's batch.
+- If a `GTC` limit order isn't fully filled, the rest of it stays in the book and joins the next tick's batch.
+- If an `IOC` limit order isn't fully filled, the rest of it expires at the end of the tick it entered, like a market order.
 - If a `MARKET` order isn't fully filled, the rest of it expires at the end of the tick it entered.
 
 ## Execution

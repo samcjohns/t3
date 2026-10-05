@@ -5,15 +5,20 @@
 package reporting
 
 import (
+	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"maps"
 	"slices"
+	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/samcjohns/t3/pkg/engine"
 	"github.com/samcjohns/t3/pkg/ledger"
+	"github.com/samcjohns/t3/pkg/listing"
 )
 
 // CandleBase is the resolution candles are stored at. Coarser intervals are
@@ -88,8 +93,51 @@ type AccountReader interface {
 	Account(id string) (ledger.Account, error)
 }
 
-// Config bounds memory use. Zero values select defaults.
+// Price is one symbol's entry in the price snapshot.
+type Price struct {
+	Symbol string `json:"symbol"`
+	Name   string `json:"name"`
+	// Price is the last clearing price, or the reference price if the
+	// symbol has never traded.
+	Price int64 `json:"price"`
+	// PreviousClose is the last price of the previous UTC day.
+	PreviousClose int64 `json:"previous_close"`
+	Change        int64 `json:"change"`
+	// Volume is shares traded so far this UTC day.
+	Volume int64 `json:"volume"`
+	// LastTradeTick is the tick of the last trade, or 0 if none.
+	LastTradeTick uint64 `json:"last_trade_tick"`
+}
+
+// PriceSnapshot is every listed symbol's current price as of one tick.
+type PriceSnapshot struct {
+	Tick uint64    `json:"tick"`
+	AsOf time.Time `json:"as_of"`
+	// NextTickAt estimates when prices next change.
+	NextTickAt time.Time `json:"next_tick_at"`
+	Prices     []Price   `json:"prices"`
+}
+
+// PriceBlob is a PriceSnapshot pre-encoded for serving: it is rebuilt once
+// per tick so readers never compute or serialise anything.
+type PriceBlob struct {
+	JSON       []byte
+	ETag       string
+	NextTickAt time.Time
+}
+
+type dayState struct {
+	price, previousClose, volume int64
+	day                          time.Time
+	lastTick                     uint64
+}
+
+// Config configures the service. Zero values select defaults.
 type Config struct {
+	// Listing is the set of symbols in the price snapshot.
+	Listing []listing.Ticker
+	// Heartbeat is the engine's tick interval, used for NextTickAt.
+	Heartbeat time.Duration
 	// MaxTradesPerSymbol caps the public tape kept per symbol. Default 1000.
 	MaxTradesPerSymbol int
 	// MaxTradesPerAccount caps the history kept per account. Default 1000.
@@ -106,6 +154,11 @@ type Service struct {
 	trades             map[string][]Trade
 	accountTrades      map[string][]AccountTrade
 	candles            map[string][]Candle
+
+	listing   []listing.Ticker
+	heartbeat time.Duration
+	days      map[string]*dayState
+	prices    atomic.Pointer[PriceBlob]
 }
 
 func New(accounts AccountReader, cfg Config) *Service {
@@ -115,7 +168,7 @@ func New(accounts AccountReader, cfg Config) *Service {
 	if cfg.MaxTradesPerAccount <= 0 {
 		cfg.MaxTradesPerAccount = 1000
 	}
-	return &Service{
+	s := &Service{
 		accounts:      accounts,
 		maxSymbol:     cfg.MaxTradesPerSymbol,
 		maxAcct:       cfg.MaxTradesPerAccount,
@@ -123,6 +176,39 @@ func New(accounts AccountReader, cfg Config) *Service {
 		trades:        make(map[string][]Trade),
 		accountTrades: make(map[string][]AccountTrade),
 		candles:       make(map[string][]Candle),
+		listing:       cfg.Listing,
+		heartbeat:     cfg.Heartbeat,
+		days:          make(map[string]*dayState),
+	}
+	for _, t := range cfg.Listing {
+		s.days[t.Symbol] = &dayState{price: t.ReferencePrice, previousClose: t.ReferencePrice}
+	}
+	s.publishPrices(0, time.Time{})
+	return s
+}
+
+// TickSource supplies committed ticks for replay.
+type TickSource interface {
+	TicksAfter(ctx context.Context, after uint64, limit int) ([]engine.TickResult, error)
+}
+
+// Replay ingests every tick src has committed after the last ingested one.
+// Call it on startup to rebuild the views from the engine's history.
+func (s *Service) Replay(ctx context.Context, src TickSource) error {
+	for {
+		s.mu.RLock()
+		after := s.lastTick
+		s.mu.RUnlock()
+		ticks, err := src.TicksAfter(ctx, after, 1000)
+		if err != nil {
+			return fmt.Errorf("fetching ticks: %w", err)
+		}
+		if len(ticks) == 0 {
+			return nil
+		}
+		for _, tr := range ticks {
+			s.Ingest(tr)
+		}
 	}
 }
 
@@ -137,9 +223,21 @@ func (s *Service) Ingest(tr engine.TickResult) {
 	}
 	s.lastTick = tr.Tick
 
+	day := tr.Timestamp.UTC().Truncate(24 * time.Hour)
+	for _, d := range s.days {
+		if !d.day.Equal(day) {
+			d.day, d.previousClose, d.volume = day, d.price, 0
+		}
+	}
+
 	for _, book := range tr.Books {
 		if book.Volume == 0 {
 			continue
+		}
+		if d, ok := s.days[book.Symbol]; ok {
+			d.price = book.ClearingPrice
+			d.volume += book.Volume
+			d.lastTick = tr.Tick
 		}
 		s.quotes[book.Symbol] = Quote{Symbol: book.Symbol, LastPrice: book.ClearingPrice, LastTick: tr.Tick, LastTime: tr.Timestamp}
 		s.addCandle(book.Symbol, tr.Timestamp, book.ClearingPrice, book.Volume)
@@ -158,6 +256,30 @@ func (s *Service) Ingest(tr engine.TickResult) {
 			}
 		}
 	}
+	s.publishPrices(tr.Tick, tr.Timestamp)
+}
+
+// publishPrices rebuilds the encoded price snapshot. It must be called with
+// s.mu held, or before s is shared.
+func (s *Service) publishPrices(tick uint64, asOf time.Time) {
+	snap := PriceSnapshot{Tick: tick, AsOf: asOf, Prices: make([]Price, len(s.listing))}
+	if !asOf.IsZero() && s.heartbeat > 0 {
+		snap.NextTickAt = asOf.Add(s.heartbeat)
+	}
+	for i, t := range s.listing {
+		d := s.days[t.Symbol]
+		snap.Prices[i] = Price{
+			Symbol: t.Symbol, Name: t.Name, Price: d.price, PreviousClose: d.previousClose,
+			Change: d.price - d.previousClose, Volume: d.volume, LastTradeTick: d.lastTick,
+		}
+	}
+	body, _ := json.Marshal(snap) // cannot fail: plain data
+	s.prices.Store(&PriceBlob{JSON: body, ETag: `"t` + strconv.FormatUint(tick, 10) + `"`, NextTickAt: snap.NextTickAt})
+}
+
+// Prices returns the current encoded price snapshot. It takes no locks.
+func (s *Service) Prices() *PriceBlob {
+	return s.prices.Load()
 }
 
 func (s *Service) addCandle(symbol string, at time.Time, price, volume int64) {

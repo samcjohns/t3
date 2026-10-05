@@ -6,7 +6,7 @@ The API gateway is the only public entry point. All bodies are JSON. Money is in
 
 - **Auth:** send `Authorization: Bearer <token>`, using a token from `POST /v1/auth/login`. Tokens are opaque and expire after 24 hours.
 - **Errors:** every error returns `{"error": {"code": "...", "message": "..."}}`.
-- **Rate limits:** clients get 10 requests per second with bursts of up to 20. Limits are counted per user when a valid token is sent, and per client IP otherwise. An over-limit request gets `429` with a `Retry-After` header.
+- **Rate limits:** clients get 10 requests per second with bursts of up to 20. Limits are counted per user when a valid token is sent, and per client IP otherwise; `/v1/market/prices` is always counted per IP. Accounts with the internal `market_maker` role are exempt. An over-limit request gets `429` with a `Retry-After` header.
 - **Request bodies:** a body must be a single JSON object of at most 64 KiB. Unknown fields are rejected.
 - **Paging:** `limit` query parameters accept 1–1000 and default to 100.
 
@@ -21,13 +21,15 @@ The API gateway is the only public entry point. All bodies are JSON. Money is in
 | `GET /v1/account/portfolio` | trader | Holdings valued at last prices. |
 | `GET /v1/account/trades?limit=` | trader | Your own fills, newest first. |
 | `POST /v1/orders` | trader | Places an order, returning `202` with the accepted order. See below. |
-| `GET /v1/market/symbols` | — | The tradable symbols. |
+| `GET /v1/market/symbols` | — | The tradable symbols, each with `name` and `reference_price`. |
+| `GET /v1/market/prices` | — | Every symbol's current price, as one pre-built snapshot that changes once per tick. It supports `ETag`/`If-None-Match`, which returns `304` while unchanged. |
 | `GET /v1/market/{symbol}/quote` | — | Last clearing price. Returns `404` if the symbol hasn't traded yet. |
 | `GET /v1/market/{symbol}/trades?limit=` | — | The public tape, newest first, with no account or order IDs. |
 | `GET /v1/market/{symbol}/candles?interval=&limit=` | — | OHLCV candles, oldest first. `interval` is one of `1m`, `5m`, `15m`, `1h` or `1d`. |
 | `POST /v1/admin/accounts/{id}/cash` | admin | `{amount}`: credits cash. |
 | `POST /v1/admin/accounts/{id}/shares` | admin | `{symbol, quantity}`: credits shares. |
 | `GET /healthz` | — | Liveness check. Not rate limited. |
+| `GET /readyz` | — | Returns `503 market_halted` while the ledger is too far behind to settle trades. |
 | `GET /metrics` | — | Prometheus counters. Keep this on an internal network. |
 
 ## Placing an order
@@ -36,9 +38,11 @@ The API gateway is the only public entry point. All bodies are JSON. Money is in
 {"symbol": "ACME", "direction": "BUY", "type": "LIMIT", "quantity": 10, "limit_price": 1010}
 ```
 
-`max_cost` is required on market buys. A client can't set `id`, `account_id` or `sequence`; the gateway assigns the ID, the account comes from the token, and the engine assigns the sequence.
+`max_cost` is required on market buys. `time_in_force` is `GTC` (the default) or `IOC`; any unfilled part of an `IOC` order expires after one auction. A client can't set `id`, `account_id` or `sequence`; the gateway assigns the ID, the account comes from the token, and the engine assigns the sequence.
 
 The gateway reserves the order's funding with the ledger before the engine sees the order. If the engine rejects it, the hold is released. The order fills at the next heartbeat.
+
+Order entry returns `503 market_halted` if the ledger falls more than 3 ticks behind the engine, because fills could no longer be settled. Market data stays available.
 
 ## Error codes
 
@@ -51,9 +55,18 @@ The gateway reserves the order's funding with the ledger before the engine sees 
 | 409 | `username_taken`, `duplicate_order` |
 | 422 | `insufficient_funds`, `insufficient_shares` |
 | 429 | `rate_limited` |
+| 503 | `market_halted` |
 | 500 | `internal_error`. Details are logged, never returned. |
 
 ## Running
+
+The full stack (Postgres, the server and two market makers) runs with:
+
+```sh
+docker compose up --build
+```
+
+To run the server alone in memory, with no database:
 
 ```sh
 T3_ADMIN_PASSWORD=change-me go run ./cmd/server
@@ -63,9 +76,23 @@ T3_ADMIN_PASSWORD=change-me go run ./cmd/server
 | --- | --- | --- |
 | `T3_ADDR` | `:8080` | Listen address |
 | `T3_HEARTBEAT` | `10s` | Batch interval |
-| `T3_SYMBOLS` | `ACME` | Comma-separated tradable symbols |
+| `T3_TICKERS_FILE` | — | A JSON listing to use instead of the 10 built-in example tickers (`pkg/listing`) |
+| `T3_DATABASE_URL` | — | Postgres URL for every service. If unset (and no per-service URL is set), state is in memory only. |
+| `T3_ENGINE_DATABASE_URL`, `T3_LEDGER_DATABASE_URL`, `T3_GATEWAY_DATABASE_URL` | `T3_DATABASE_URL` | Per-service URLs, one role each |
+| `T3_MARKET_MAKERS` | `mm-liquidity,mm-flow` | Market maker accounts to bootstrap |
+| `T3_MARKET_MAKER_PASSWORD` | — | If unset, no market makers are created |
+| `T3_MARKET_MAKER_CASH` | `500000000` | Cents seeded to each market maker; shares come from the listing |
 | `T3_STARTING_CASH` | `1000000` | Cents credited to each new trader |
 | `T3_ALLOWED_ORIGINS` | — | Comma-separated CORS origins |
 | `T3_ADMIN_USERNAME` | `admin` | Bootstrap admin username |
 | `T3_ADMIN_PASSWORD` | — | If unset, no admin is created |
 | `T3_LOG_LEVEL` | `info` | `debug`, `info`, `warn` or `error` |
+
+## Market makers
+
+`cmd/marketmaker` runs one market maker per process against this API. Each one is configured with `T3_API_URL`, `T3_MM_USERNAME`, `T3_MM_PASSWORD`, `T3_MM_STRATEGY` (`liquidity` or `flow`) and an optional `T3_MM_SEED`.
+
+- **`liquidity`** quotes an IOC bid and ask around every price. Its fair value drifts back toward the reference price, and it skews quotes against its inventory.
+- **`flow`** is a noise trader. Each tick it crosses the spread on about half the symbols, steered by a slowly wandering sentiment per symbol.
+
+Both send only IOC orders, so nothing they place ever rests in the book.

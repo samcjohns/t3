@@ -12,15 +12,20 @@
 // Settlement releases unused cash as orders fill: a limit buy that clears
 // below its limit gets the difference back, and whatever is left of a market
 // buy's hold is released when the order fills or expires.
+//
+// With a Store, every operation is persisted before it takes effect in
+// memory, so a failed write changes nothing.
 package ledger
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"maps"
 	"math"
 	"slices"
 	"sync"
+	"time"
 
 	"github.com/samcjohns/t3/pkg/engine"
 )
@@ -58,9 +63,33 @@ type Holding struct {
 	Held     int64 `json:"held"`
 }
 
+// TickSource supplies committed ticks for catching up.
+type TickSource interface {
+	TicksAfter(ctx context.Context, after uint64, limit int) ([]engine.TickResult, error)
+}
+
+// OrderChecker reports which orders the engine has ever accepted.
+type OrderChecker interface {
+	KnownOrders(ctx context.Context, ids []string) (map[string]bool, error)
+}
+
 type account struct {
 	cash, cashHeld     int64
 	shares, sharesHeld map[string]int64
+}
+
+func (a *account) clone() *account {
+	return &account{a.cash, a.cashHeld, maps.Clone(a.shares), maps.Clone(a.sharesHeld)}
+}
+
+func (a *account) snapshot(id string) Account {
+	out := Account{ID: id, Cash: a.cash, CashHeld: a.cashHeld, Holdings: []Holding{}}
+	for _, sym := range slices.Sorted(maps.Keys(a.shares)) {
+		if a.shares[sym] > 0 {
+			out.Holdings = append(out.Holdings, Holding{Symbol: sym, Quantity: a.shares[sym], Held: a.sharesHeld[sym]})
+		}
+	}
+	return out
 }
 
 // hold reserves the funding for one open order.
@@ -70,24 +99,185 @@ type hold struct {
 	remaining int64
 	// cash and shares are what is still held for the order.
 	cash, shares int64
+	createdAt    time.Time
 }
+
+func (h *hold) state() HoldState {
+	return HoldState{Order: h.order, Remaining: h.remaining, Cash: h.cash, Shares: h.shares, CreatedAt: h.createdAt}
+}
+
+// Config configures a Ledger. Zero values select defaults.
+type Config struct {
+	// Store persists the ledger. Without one, state is in memory only.
+	Store Store
+	// Clock timestamps holds and entries. Defaults to time.Now.
+	Clock func() time.Time
+}
+
+type refKey struct{ account, ref string }
 
 // Ledger is safe for concurrent use.
 type Ledger struct {
+	store Store
+	clock func() time.Time
+
 	mu       sync.Mutex
 	accounts map[string]*account
 	holds    map[string]*hold
+	refs     map[refKey]struct{}
 	lastTick uint64
 }
 
+// New returns an empty in-memory ledger.
 func New() *Ledger {
-	return &Ledger{
-		accounts: make(map[string]*account),
-		holds:    make(map[string]*hold),
-	}
+	l, _ := Open(context.Background(), Config{})
+	return l
 }
 
-func (l *Ledger) OpenAccount(id string) error {
+// Open returns a ledger restored from cfg.Store.
+func Open(ctx context.Context, cfg Config) (*Ledger, error) {
+	if cfg.Clock == nil {
+		cfg.Clock = time.Now
+	}
+	l := &Ledger{
+		store:    cfg.Store,
+		clock:    cfg.Clock,
+		accounts: make(map[string]*account),
+		holds:    make(map[string]*hold),
+		refs:     make(map[refKey]struct{}),
+	}
+	if l.store == nil {
+		return l, nil
+	}
+	st, err := l.store.Load(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("loading ledger: %w", err)
+	}
+	for _, a := range st.Accounts {
+		acc := &account{cash: a.Cash, cashHeld: a.CashHeld, shares: map[string]int64{}, sharesHeld: map[string]int64{}}
+		for _, h := range a.Holdings {
+			acc.shares[h.Symbol] = h.Quantity
+			if h.Held > 0 {
+				acc.sharesHeld[h.Symbol] = h.Held
+			}
+		}
+		l.accounts[a.ID] = acc
+	}
+	for _, h := range st.Holds {
+		l.holds[h.Order.ID] = &hold{order: h.Order, remaining: h.Remaining, cash: h.Cash, shares: h.Shares, createdAt: h.CreatedAt}
+	}
+	for _, r := range st.References {
+		l.refs[refKey{r.AccountID, r.Reference}] = struct{}{}
+	}
+	l.lastTick = st.LastTick
+	return l, nil
+}
+
+// txn stages one operation on copies of the state it touches. Nothing is
+// visible until commit persists it.
+type txn struct {
+	l        *Ledger
+	accounts map[string]*account
+	holds    map[string]*hold // nil marks a deleted hold
+	entries  []Entry
+	lastTick *uint64
+}
+
+// begin must be called with l.mu held.
+func (l *Ledger) begin() *txn {
+	return &txn{l: l, accounts: map[string]*account{}, holds: map[string]*hold{}}
+}
+
+func (t *txn) account(id string) (*account, error) {
+	if a, ok := t.accounts[id]; ok {
+		return a, nil
+	}
+	a, ok := t.l.accounts[id]
+	if !ok {
+		return nil, fmt.Errorf("%w: %q", ErrUnknownAccount, id)
+	}
+	a = a.clone()
+	t.accounts[id] = a
+	return a, nil
+}
+
+// hold returns a staged copy of a hold, or nil if there is none.
+func (t *txn) hold(id string) *hold {
+	if h, ok := t.holds[id]; ok {
+		return h
+	}
+	h, ok := t.l.holds[id]
+	if !ok {
+		return nil
+	}
+	c := *h
+	t.holds[id] = &c
+	return &c
+}
+
+func (t *txn) entry(e Entry) {
+	e.CreatedAt = t.l.clock()
+	t.entries = append(t.entries, e)
+}
+
+// release frees the remainder of a hold. The hold must exist.
+func (t *txn) release(orderID string) {
+	h := t.hold(orderID)
+	a, _ := t.account(h.order.AccountID)
+	sym := h.order.Symbol
+	a.cashHeld -= h.cash
+	a.sharesHeld[sym] -= h.shares
+	if a.sharesHeld[sym] == 0 {
+		delete(a.sharesHeld, sym)
+	}
+	if a.shares[sym] == 0 {
+		delete(a.shares, sym)
+	}
+	t.holds[orderID] = nil
+}
+
+func (t *txn) commit(ctx context.Context) error {
+	var ch Changes
+	for _, id := range slices.Sorted(maps.Keys(t.accounts)) {
+		ch.Accounts = append(ch.Accounts, t.accounts[id].snapshot(id))
+	}
+	for _, id := range slices.Sorted(maps.Keys(t.holds)) {
+		if h := t.holds[id]; h == nil {
+			ch.DeleteHolds = append(ch.DeleteHolds, id)
+		} else {
+			ch.PutHolds = append(ch.PutHolds, h.state())
+		}
+	}
+	ch.Entries = t.entries
+	ch.LastTick = t.lastTick
+
+	if t.l.store != nil {
+		if err := t.l.store.Apply(ctx, ch); err != nil {
+			return fmt.Errorf("persisting ledger change: %w", err)
+		}
+	}
+
+	l := t.l
+	maps.Copy(l.accounts, t.accounts)
+	for id, h := range t.holds {
+		if h == nil {
+			delete(l.holds, id)
+		} else {
+			l.holds[id] = h
+		}
+	}
+	for _, e := range t.entries {
+		if e.Reference != "" {
+			l.refs[refKey{e.AccountID, e.Reference}] = struct{}{}
+		}
+	}
+	if t.lastTick != nil {
+		l.lastTick = *t.lastTick
+	}
+	return nil
+}
+
+func (l *Ledger) OpenAccount(ctx context.Context, id string) error {
 	if id == "" {
 		return fmt.Errorf("%w: account id is required", ErrInvalidAmount)
 	}
@@ -96,50 +286,64 @@ func (l *Ledger) OpenAccount(id string) error {
 	if _, ok := l.accounts[id]; ok {
 		return fmt.Errorf("%w: %q", ErrAccountExists, id)
 	}
-	l.accounts[id] = &account{shares: map[string]int64{}, sharesHeld: map[string]int64{}}
-	return nil
+	t := l.begin()
+	t.accounts[id] = &account{shares: map[string]int64{}, sharesHeld: map[string]int64{}}
+	return t.commit(ctx)
 }
 
-// Deposit credits cash to an account.
-func (l *Ledger) Deposit(accountID string, amount int64) error {
+// Deposit credits cash to an account. A non-empty reference makes the
+// deposit idempotent: a repeat with the same reference does nothing.
+func (l *Ledger) Deposit(ctx context.Context, accountID string, amount int64, reference string) error {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	a, err := l.account(accountID)
+	t := l.begin()
+	a, err := t.account(accountID)
 	if err != nil {
 		return err
+	}
+	if _, done := l.refs[refKey{accountID, reference}]; reference != "" && done {
+		return nil
 	}
 	if amount <= 0 || a.cash > math.MaxInt64-amount {
 		return fmt.Errorf("%w: deposit %d", ErrInvalidAmount, amount)
 	}
 	a.cash += amount
-	return nil
+	t.entry(Entry{AccountID: accountID, Kind: EntryDeposit, Reference: reference, CashDelta: amount})
+	return t.commit(ctx)
 }
 
-// DepositShares credits shares to an account, e.g. to seed market makers.
-func (l *Ledger) DepositShares(accountID, symbol string, quantity int64) error {
+// DepositShares credits shares to an account, e.g. to seed market makers. A
+// non-empty reference makes it idempotent, as for Deposit.
+func (l *Ledger) DepositShares(ctx context.Context, accountID, symbol string, quantity int64, reference string) error {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	a, err := l.account(accountID)
+	t := l.begin()
+	a, err := t.account(accountID)
 	if err != nil {
 		return err
+	}
+	if _, done := l.refs[refKey{accountID, reference}]; reference != "" && done {
+		return nil
 	}
 	if symbol == "" || quantity <= 0 || a.shares[symbol] > math.MaxInt64-quantity {
 		return fmt.Errorf("%w: deposit %d %q", ErrInvalidAmount, quantity, symbol)
 	}
 	a.shares[symbol] += quantity
-	return nil
+	t.entry(Entry{AccountID: accountID, Kind: EntryShareDeposit, Reference: reference, Symbol: symbol, ShareDelta: quantity})
+	return t.commit(ctx)
 }
 
 // Reserve places a hold funding the order. It must succeed before the order
 // is submitted to the engine; if the engine then rejects the order, call
 // Release.
-func (l *Ledger) Reserve(order engine.Order) error {
+func (l *Ledger) Reserve(ctx context.Context, order engine.Order) error {
 	if err := order.Validate(); err != nil {
 		return err
 	}
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	a, err := l.account(order.AccountID)
+	t := l.begin()
+	a, err := t.account(order.AccountID)
 	if err != nil {
 		return err
 	}
@@ -147,7 +351,7 @@ func (l *Ledger) Reserve(order engine.Order) error {
 		return fmt.Errorf("%w: %q", ErrDuplicateHold, order.ID)
 	}
 
-	h := &hold{order: order, remaining: order.Quantity}
+	h := &hold{order: order, remaining: order.Quantity, createdAt: l.clock()}
 	switch {
 	case order.Direction == engine.Sell:
 		if avail := a.shares[order.Symbol] - a.sharesHeld[order.Symbol]; avail < order.Quantity {
@@ -169,25 +373,27 @@ func (l *Ledger) Reserve(order engine.Order) error {
 		h.cash = cost
 		a.cashHeld += h.cash
 	}
-	l.holds[order.ID] = h
-	return nil
+	t.holds[order.ID] = h
+	return t.commit(ctx)
 }
 
 // Release removes an order's hold and frees whatever it still reserves.
-func (l *Ledger) Release(orderID string) error {
+func (l *Ledger) Release(ctx context.Context, orderID string) error {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	if _, ok := l.holds[orderID]; !ok {
 		return fmt.Errorf("%w: %q", ErrUnknownHold, orderID)
 	}
-	l.release(orderID)
-	return nil
+	t := l.begin()
+	t.release(orderID)
+	return t.commit(ctx)
 }
 
 // ApplyTick settles a tick's executions and releases the holds of expired
 // orders. Ticks must be applied exactly once each, in order. A tick is applied
-// atomically: if any part of it is rejected, nothing changes.
-func (l *Ledger) ApplyTick(tr engine.TickResult) error {
+// atomically: if any part of it is rejected or fails to persist, nothing
+// changes.
+func (l *Ledger) ApplyTick(ctx context.Context, tr engine.TickResult) error {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	switch {
@@ -200,12 +406,13 @@ func (l *Ledger) ApplyTick(tr engine.TickResult) error {
 		return err
 	}
 
+	t := l.begin()
 	for _, book := range tr.Books {
 		for _, e := range book.Executions {
 			cost := e.Price * e.Quantity
 
-			bh := l.holds[e.BuyOrderID]
-			buyer := l.accounts[bh.order.AccountID]
+			bh := t.hold(e.BuyOrderID)
+			buyer, _ := t.account(bh.order.AccountID)
 			debit := cost
 			if bh.order.Type == engine.Limit {
 				debit = e.Quantity * bh.order.LimitPrice
@@ -215,27 +422,31 @@ func (l *Ledger) ApplyTick(tr engine.TickResult) error {
 			buyer.cashHeld -= debit
 			buyer.cash -= cost
 			buyer.shares[e.Symbol] += e.Quantity
+			t.entry(Entry{AccountID: bh.order.AccountID, Kind: EntryBuy, Tick: tr.Tick, OrderID: bh.order.ID,
+				CashDelta: -cost, Symbol: e.Symbol, ShareDelta: e.Quantity})
 
-			sh := l.holds[e.SellOrderID]
-			seller := l.accounts[sh.order.AccountID]
+			sh := t.hold(e.SellOrderID)
+			seller, _ := t.account(sh.order.AccountID)
 			sh.shares -= e.Quantity
 			sh.remaining -= e.Quantity
 			seller.sharesHeld[e.Symbol] -= e.Quantity
 			seller.shares[e.Symbol] -= e.Quantity
 			seller.cash += cost
+			t.entry(Entry{AccountID: sh.order.AccountID, Kind: EntrySell, Tick: tr.Tick, OrderID: sh.order.ID,
+				CashDelta: cost, Symbol: e.Symbol, ShareDelta: -e.Quantity})
 
 			for _, h := range []*hold{bh, sh} {
 				if h.remaining == 0 {
-					l.release(h.order.ID)
+					t.release(h.order.ID)
 				}
 			}
 		}
 		for _, id := range book.ExpiredOrderIDs {
-			l.release(id)
+			t.release(id)
 		}
 	}
-	l.lastTick = tr.Tick
-	return nil
+	t.lastTick = &tr.Tick
+	return t.commit(ctx)
 }
 
 // checkTick verifies, without changing state, that every execution and expiry
@@ -307,36 +518,75 @@ func (l *Ledger) checkTick(tr engine.TickResult) error {
 	return nil
 }
 
-// release frees the remainder of a hold. The hold must exist.
-func (l *Ledger) release(orderID string) {
-	h := l.holds[orderID]
-	a := l.accounts[h.order.AccountID]
-	a.cashHeld -= h.cash
-	a.sharesHeld[h.order.Symbol] -= h.shares
-	if a.sharesHeld[h.order.Symbol] == 0 {
-		delete(a.sharesHeld, h.order.Symbol)
+// CatchUp applies every tick src has committed after LastTick.
+func (l *Ledger) CatchUp(ctx context.Context, src TickSource) error {
+	for {
+		ticks, err := src.TicksAfter(ctx, l.LastTick(), 500)
+		if err != nil {
+			return fmt.Errorf("fetching ticks: %w", err)
+		}
+		if len(ticks) == 0 {
+			return nil
+		}
+		for _, tr := range ticks {
+			if err := l.ApplyTick(ctx, tr); err != nil && !errors.Is(err, ErrTickAlreadyApplied) {
+				return err
+			}
+		}
 	}
-	if a.shares[h.order.Symbol] == 0 {
-		delete(a.shares, h.order.Symbol)
+}
+
+// ReconcileHolds releases holds older than grace whose order the engine has
+// never accepted: the gateway reserved them and failed before submitting. The
+// grace period must comfortably exceed the time a submission can take.
+func (l *Ledger) ReconcileHolds(ctx context.Context, checker OrderChecker, grace time.Duration) ([]string, error) {
+	l.mu.Lock()
+	cutoff := l.clock().Add(-grace)
+	var candidates []string
+	for id, h := range l.holds {
+		if h.createdAt.Before(cutoff) {
+			candidates = append(candidates, id)
+		}
 	}
-	delete(l.holds, orderID)
+	l.mu.Unlock()
+	if len(candidates) == 0 {
+		return nil, nil
+	}
+	slices.Sort(candidates)
+
+	known, err := checker.KnownOrders(ctx, candidates)
+	if err != nil {
+		return nil, fmt.Errorf("checking orders: %w", err)
+	}
+
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	t := l.begin()
+	var released []string
+	for _, id := range candidates {
+		if _, ok := l.holds[id]; ok && !known[id] {
+			t.release(id)
+			released = append(released, id)
+		}
+	}
+	if len(released) == 0 {
+		return nil, nil
+	}
+	if err := t.commit(ctx); err != nil {
+		return nil, err
+	}
+	return released, nil
 }
 
 // Account returns a snapshot of an account.
 func (l *Ledger) Account(id string) (Account, error) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	a, err := l.account(id)
-	if err != nil {
-		return Account{}, err
+	a, ok := l.accounts[id]
+	if !ok {
+		return Account{}, fmt.Errorf("%w: %q", ErrUnknownAccount, id)
 	}
-	out := Account{ID: id, Cash: a.cash, CashHeld: a.cashHeld, Holdings: []Holding{}}
-	for _, sym := range slices.Sorted(maps.Keys(a.shares)) {
-		if a.shares[sym] > 0 {
-			out.Holdings = append(out.Holdings, Holding{Symbol: sym, Quantity: a.shares[sym], Held: a.sharesHeld[sym]})
-		}
-	}
-	return out, nil
+	return a.snapshot(id), nil
 }
 
 // LastTick returns the most recent tick applied.
@@ -344,12 +594,4 @@ func (l *Ledger) LastTick() uint64 {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	return l.lastTick
-}
-
-func (l *Ledger) account(id string) (*account, error) {
-	a, ok := l.accounts[id]
-	if !ok {
-		return nil, fmt.Errorf("%w: %q", ErrUnknownAccount, id)
-	}
-	return a, nil
 }

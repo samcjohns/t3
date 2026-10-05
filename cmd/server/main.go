@@ -17,30 +17,46 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgxpool"
+
 	"github.com/samcjohns/t3/pkg/engine"
+	enginepg "github.com/samcjohns/t3/pkg/engine/postgres"
 	"github.com/samcjohns/t3/pkg/gateway"
+	gatewaypg "github.com/samcjohns/t3/pkg/gateway/postgres"
 	"github.com/samcjohns/t3/pkg/ledger"
+	ledgerpg "github.com/samcjohns/t3/pkg/ledger/postgres"
+	"github.com/samcjohns/t3/pkg/listing"
 	"github.com/samcjohns/t3/pkg/reporting"
 )
 
 type config struct {
 	addr          string
 	heartbeat     time.Duration
-	symbols       []string
+	tickers       []listing.Ticker
+	makers        []string
+	makerPassword string
+	makerCash     int64
 	startingCash  int64
 	origins       []string
 	adminUsername string
 	adminPassword string
 	logLevel      slog.Level
+	engineDB      string
+	ledgerDB      string
+	gatewayDB     string
 }
 
 func loadConfig() (config, error) {
 	c := config{
 		addr:          env("T3_ADDR", ":8080"),
-		symbols:       split(env("T3_SYMBOLS", "ACME")),
+		makers:        split(env("T3_MARKET_MAKERS", "mm-liquidity,mm-flow")),
+		makerPassword: os.Getenv("T3_MARKET_MAKER_PASSWORD"),
 		origins:       split(os.Getenv("T3_ALLOWED_ORIGINS")),
 		adminUsername: env("T3_ADMIN_USERNAME", "admin"),
 		adminPassword: os.Getenv("T3_ADMIN_PASSWORD"),
+		engineDB:      env("T3_ENGINE_DATABASE_URL", os.Getenv("T3_DATABASE_URL")),
+		ledgerDB:      env("T3_LEDGER_DATABASE_URL", os.Getenv("T3_DATABASE_URL")),
+		gatewayDB:     env("T3_GATEWAY_DATABASE_URL", os.Getenv("T3_DATABASE_URL")),
 	}
 	var err error
 	if c.heartbeat, err = time.ParseDuration(env("T3_HEARTBEAT", engine.DefaultHeartbeat.String())); err != nil || c.heartbeat <= 0 {
@@ -52,8 +68,14 @@ func loadConfig() (config, error) {
 	if err := c.logLevel.UnmarshalText([]byte(env("T3_LOG_LEVEL", "info"))); err != nil {
 		return c, fmt.Errorf("T3_LOG_LEVEL: %w", err)
 	}
-	if len(c.symbols) == 0 {
-		return c, fmt.Errorf("T3_SYMBOLS must list at least one symbol")
+	if c.makerCash, err = strconv.ParseInt(env("T3_MARKET_MAKER_CASH", "500000000"), 10, 64); err != nil || c.makerCash < 0 {
+		return c, fmt.Errorf("T3_MARKET_MAKER_CASH must be a non-negative integer of cents")
+	}
+	c.tickers = listing.Default()
+	if path := os.Getenv("T3_TICKERS_FILE"); path != "" {
+		if c.tickers, err = listing.Load(path); err != nil {
+			return c, fmt.Errorf("T3_TICKERS_FILE: %w", err)
+		}
 	}
 	return c, nil
 }
@@ -90,42 +112,73 @@ func run() error {
 	log := slog.New(slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{Level: cfg.logLevel}))
 	slog.SetDefault(log)
 
-	ldg := ledger.New()
-	reports := reporting.New(ldg, reporting.Config{})
-	eng := engine.NewOrchestrator(engine.FBAMatcher{}, engine.Config{
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+
+	stores, closeStores, err := openStores(ctx, cfg, log)
+	if err != nil {
+		return err
+	}
+	defer closeStores()
+
+	// Recover in dependency order: the engine's journal is the record the
+	// ledger and reporting service rebuild from.
+	ldg, err := ledger.Open(ctx, ledger.Config{Store: stores.ledger})
+	if err != nil {
+		return err
+	}
+	reports := reporting.New(ldg, reporting.Config{Listing: cfg.tickers, Heartbeat: cfg.heartbeat})
+	var eng *engine.Orchestrator
+	eng, err = engine.OpenOrchestrator(ctx, engine.FBAMatcher{}, engine.Config{
 		Heartbeat: cfg.heartbeat,
 		Clock:     func() time.Time { return time.Now().UTC() },
+		Journal:   stores.journal,
 		OnTick: func(tr engine.TickResult) {
 			var volume int64
 			for _, b := range tr.Books {
 				volume += b.Volume
 			}
 			log.Debug("tick", "tick", tr.Tick, "books", len(tr.Books), "volume", volume)
-			if err := ldg.ApplyTick(tr); err != nil {
-				// The ledger refused to settle: balances no longer match the
-				// engine. This needs operator attention.
-				log.Error("ledger rejected tick", "tick", tr.Tick, "err", err)
-			}
+			settle(log, ldg, eng, tr)
 			reports.Ingest(tr)
 		},
+		OnTickError: func(err error) { log.Error("tick failed; retrying next heartbeat", "err", err) },
 	})
+	if err != nil {
+		return err
+	}
+	if stores.journal != nil {
+		if err := ldg.CatchUp(ctx, eng); err != nil {
+			return fmt.Errorf("ledger catch-up: %w", err)
+		}
+		reconcile(ctx, log, ldg, eng)
+		if err := reports.Replay(ctx, eng); err != nil {
+			return fmt.Errorf("reporting replay: %w", err)
+		}
+	}
+	log.Info("state recovered", "engine_tick", eng.LastTick(), "ledger_tick", ldg.LastTick())
+
 	gw := gateway.New(eng, ldg, reports, gateway.Config{
-		Symbols:        cfg.symbols,
+		Tickers:        cfg.tickers,
 		StartingCash:   cfg.startingCash,
 		AllowedOrigins: cfg.origins,
+		Users:          stores.users,
 		Logger:         log,
 	})
 
 	if cfg.adminPassword != "" {
-		if _, err := gw.CreateUser(cfg.adminUsername, cfg.adminPassword, gateway.RoleAdmin); err != nil {
+		if _, err := gw.EnsureUser(ctx, cfg.adminUsername, cfg.adminPassword, gateway.RoleAdmin); err != nil {
 			return fmt.Errorf("creating admin user: %w", err)
 		}
 	} else {
 		log.Warn("T3_ADMIN_PASSWORD not set; no admin user, so nobody can seed shares")
 	}
-
-	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
-	defer stop()
+	if err := bootstrapMakers(ctx, cfg, gw, ldg); err != nil {
+		return err
+	}
+	if cfg.makerPassword == "" {
+		log.Warn("T3_MARKET_MAKER_PASSWORD not set; no market makers, so prices only move on player trades")
+	}
 
 	srv := &http.Server{
 		Addr:              cfg.addr,
@@ -137,11 +190,28 @@ func run() error {
 	}
 	errc := make(chan error, 1)
 	go func() { errc <- srv.ListenAndServe() }()
-	go eng.Run(ctx)
-	log.Info("server started", "addr", cfg.addr, "heartbeat", cfg.heartbeat, "symbols", cfg.symbols)
+	engineDone := make(chan struct{})
+	go func() { eng.Run(ctx); close(engineDone) }()
+	if stores.journal != nil {
+		go func() {
+			t := time.NewTicker(time.Minute)
+			defer t.Stop()
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case <-t.C:
+					reconcile(ctx, log, ldg, eng)
+				}
+			}
+		}()
+	}
+	log.Info("server started", "addr", cfg.addr, "heartbeat", cfg.heartbeat, "symbols", listing.Symbols(cfg.tickers))
 
 	select {
 	case err := <-errc:
+		stop()
+		<-engineDone
 		return err
 	case <-ctx.Done():
 	}
@@ -151,5 +221,116 @@ func run() error {
 	if err := srv.Shutdown(shutdownCtx); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		return err
 	}
+	<-engineDone // let an in-progress tick commit before the database closes
 	return nil
+}
+
+// bootstrapMakers creates each market maker user and seeds it with cash and
+// every listed symbol's maker shares. References make seeding idempotent, so
+// restarts never re-credit, and a newly listed symbol is seeded once.
+func bootstrapMakers(ctx context.Context, cfg config, gw *gateway.Gateway, ldg *ledger.Ledger) error {
+	if cfg.makerPassword == "" {
+		return nil
+	}
+	for _, name := range cfg.makers {
+		u, err := gw.EnsureUser(ctx, name, cfg.makerPassword, gateway.RoleMarketMaker)
+		if err != nil {
+			return fmt.Errorf("creating market maker %s: %w", name, err)
+		}
+		if cfg.makerCash > 0 {
+			if err := ldg.Deposit(ctx, u.ID, cfg.makerCash, "seed-cash"); err != nil {
+				return fmt.Errorf("seeding %s: %w", name, err)
+			}
+		}
+		for _, t := range cfg.tickers {
+			if t.MakerShares == 0 {
+				continue
+			}
+			if err := ldg.DepositShares(ctx, u.ID, t.Symbol, t.MakerShares, "seed:"+t.Symbol); err != nil {
+				return fmt.Errorf("seeding %s with %s: %w", name, t.Symbol, err)
+			}
+		}
+	}
+	return nil
+}
+
+// settle applies a tick to the ledger, catching up first if it missed any.
+func settle(log *slog.Logger, ldg *ledger.Ledger, eng *engine.Orchestrator, tr engine.TickResult) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	err := ldg.ApplyTick(ctx, tr)
+	if errors.Is(err, ledger.ErrTickOutOfOrder) {
+		err = ldg.CatchUp(ctx, eng)
+	}
+	if err != nil {
+		// Order entry halts once the lag exceeds the gateway's limit; the
+		// next tick retries via catch-up.
+		log.Error("ledger did not settle tick", "tick", tr.Tick, "ledger_tick", ldg.LastTick(), "err", err)
+	}
+}
+
+func reconcile(ctx context.Context, log *slog.Logger, ldg *ledger.Ledger, eng *engine.Orchestrator) {
+	released, err := ldg.ReconcileHolds(ctx, eng, 30*time.Second)
+	if err != nil {
+		log.Error("reconciling holds", "err", err)
+		return
+	}
+	if len(released) > 0 {
+		log.Warn("released orphaned holds", "order_ids", released)
+	}
+}
+
+type stores struct {
+	journal engine.Journal
+	ledger  ledger.Store
+	users   gateway.UserStore
+}
+
+// openStores connects each service to its own database role. Without any
+// database URL the system runs in memory only.
+func openStores(ctx context.Context, cfg config, log *slog.Logger) (stores, func(), error) {
+	var s stores
+	var pools []*pgxpool.Pool
+	closeAll := func() {
+		for _, p := range pools {
+			p.Close()
+		}
+	}
+	if cfg.engineDB == "" && cfg.ledgerDB == "" && cfg.gatewayDB == "" {
+		log.Warn("no database configured; running in memory, all state is lost on exit")
+		return s, closeAll, nil
+	}
+	connect := func(name, url string) (*pgxpool.Pool, error) {
+		if url == "" {
+			return nil, fmt.Errorf("no database URL for the %s; set T3_DATABASE_URL or T3_%s_DATABASE_URL", name, strings.ToUpper(name))
+		}
+		p, err := pgxpool.New(ctx, url)
+		if err != nil {
+			return nil, err
+		}
+		pools = append(pools, p)
+		return p, p.Ping(ctx)
+	}
+	fail := func(err error) (stores, func(), error) { closeAll(); return stores{}, nil, err }
+
+	p, err := connect("engine", cfg.engineDB)
+	if err != nil {
+		return fail(err)
+	}
+	if s.journal, err = enginepg.NewJournal(ctx, p); err != nil {
+		return fail(err)
+	}
+	if p, err = connect("ledger", cfg.ledgerDB); err != nil {
+		return fail(err)
+	}
+	if s.ledger, err = ledgerpg.NewStore(ctx, p); err != nil {
+		return fail(err)
+	}
+	if p, err = connect("gateway", cfg.gatewayDB); err != nil {
+		return fail(err)
+	}
+	if s.users, err = gatewaypg.NewUserStore(ctx, p); err != nil {
+		return fail(err)
+	}
+	return s, closeAll, nil
 }

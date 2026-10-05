@@ -2,6 +2,7 @@ package gateway
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"io"
@@ -15,6 +16,7 @@ import (
 
 	"github.com/samcjohns/t3/pkg/engine"
 	"github.com/samcjohns/t3/pkg/ledger"
+	"github.com/samcjohns/t3/pkg/listing"
 	"github.com/samcjohns/t3/pkg/reporting"
 )
 
@@ -47,18 +49,18 @@ type env struct {
 
 func newEnv(t *testing.T, tweak func(*Config)) *env {
 	e := &env{t: t, clock: &clock{now: time.Date(2026, 10, 4, 12, 0, 0, 0, time.UTC)}, ledger: ledger.New()}
-	reports := reporting.New(e.ledger, reporting.Config{})
+	reports := reporting.New(e.ledger, reporting.Config{Listing: tickers("ACME", "ZED"), Heartbeat: 10 * time.Second})
 	e.eng = engine.NewOrchestrator(engine.FBAMatcher{}, engine.Config{
 		Clock: e.clock.Now,
 		OnTick: func(tr engine.TickResult) {
-			if err := e.ledger.ApplyTick(tr); err != nil {
+			if err := e.ledger.ApplyTick(context.Background(), tr); err != nil {
 				t.Errorf("ApplyTick: %v", err)
 			}
 			reports.Ingest(tr)
 		},
 	})
 	cfg := Config{
-		Symbols:            []string{"ACME", "ZED"},
+		Tickers:            tickers("ACME", "ZED"),
 		StartingCash:       100_000,
 		PasswordIterations: 1,
 		RateLimit:          1000,
@@ -138,11 +140,26 @@ func (e *env) trader(name string) (token, id string) {
 
 func (e *env) admin() string {
 	e.t.Helper()
-	if _, err := e.gw.CreateUser("root", "admin password", RoleAdmin); err != nil {
+	if _, err := e.gw.CreateUser(context.Background(), "root", "admin password", RoleAdmin); err != nil {
 		e.t.Fatal(err)
 	}
 	login := e.expect(e.do("POST", "/v1/auth/login", "", map[string]string{"username": "root", "password": "admin password"}), http.StatusOK)
 	return login.body["token"].(string)
+}
+
+func (e *env) tick() {
+	e.t.Helper()
+	if _, err := e.eng.Tick(context.Background()); err != nil {
+		e.t.Fatal(err)
+	}
+}
+
+func tickers(symbols ...string) []listing.Ticker {
+	var out []listing.Ticker
+	for i, s := range symbols {
+		out = append(out, listing.Ticker{Symbol: s, Name: s + " Corp", ReferencePrice: int64(1000 * (i + 1))})
+	}
+	return out
 }
 
 func num(v any) int64 { return int64(v.(float64)) }
@@ -233,7 +250,7 @@ func TestTradingEndToEnd(t *testing.T) {
 		t.Fatalf("hold before tick = %v", held.body)
 	}
 
-	e.eng.Tick() // clears 10 @ 1005
+	e.tick() // clears 10 @ 1005
 
 	q := e.expect(e.do("GET", "/v1/market/ACME/quote", "", nil), http.StatusOK)
 	if num(q.body["last_price"]) != 1005 {
@@ -302,14 +319,16 @@ func TestOrderValidation(t *testing.T) {
 
 type failingMarket struct{}
 
-func (failingMarket) Submit(engine.Order) (engine.Order, error) {
+func (failingMarket) Submit(context.Context, engine.Order) (engine.Order, error) {
 	return engine.Order{}, errors.New("engine unavailable")
 }
+
+func (failingMarket) LastTick() uint64 { return 0 }
 
 func TestEngineRejectionReleasesHold(t *testing.T) {
 	l := ledger.New()
 	gw := New(failingMarket{}, l, reporting.New(l, reporting.Config{}), Config{
-		Symbols: []string{"ACME"}, StartingCash: 100_000, PasswordIterations: 1,
+		Tickers: tickers("ACME"), StartingCash: 100_000, PasswordIterations: 1,
 		Logger: slog.New(slog.DiscardHandler),
 	})
 	e := &env{t: t, gw: gw, srv: httptest.NewServer(gw.Handler())}
@@ -370,5 +389,117 @@ func TestMetrics(t *testing.T) {
 	res.Body.Close()
 	if want := `t3_gateway_requests_total{route="GET /v1/market/symbols",status="200"} 1`; !strings.Contains(string(body), want) {
 		t.Fatalf("metrics missing %q:\n%s", want, body)
+	}
+}
+
+// laggingLedger reports a stale tick so the gateway sees settlement lag.
+type laggingLedger struct {
+	*ledger.Ledger
+	lag *bool
+}
+
+func (l laggingLedger) LastTick() uint64 {
+	if *l.lag {
+		return 0
+	}
+	return l.Ledger.LastTick()
+}
+
+func TestHaltsWhenLedgerLags(t *testing.T) {
+	e := newEnv(t, nil)
+	lag := false
+	gw := New(e.eng, laggingLedger{e.ledger, &lag}, reporting.New(e.ledger, reporting.Config{}), Config{
+		Tickers: tickers("ACME"), StartingCash: 100_000, PasswordIterations: 1, Logger: slog.New(slog.DiscardHandler),
+	})
+	e.srv.Config.Handler = gw.Handler()
+	e.gw = gw
+	token, _ := e.trader("alice")
+	for range 4 {
+		e.tick()
+	}
+	place := func() response {
+		return e.do("POST", "/v1/orders", token, map[string]any{"symbol": "ACME", "direction": "BUY", "type": "LIMIT", "quantity": 1, "limit_price": 100})
+	}
+	e.expect(e.do("GET", "/readyz", "", nil), http.StatusOK)
+	e.expect(place(), http.StatusAccepted)
+
+	lag = true // ledger stuck at tick 0, engine at 4 > MaxLedgerLag 3
+	if r := place(); r.status != http.StatusServiceUnavailable || r.errorCode() != "market_halted" {
+		t.Fatalf("order while lagging = %d %v", r.status, r.body)
+	}
+	e.expect(e.do("GET", "/readyz", "", nil), http.StatusServiceUnavailable)
+	e.expect(e.do("GET", "/v1/market/symbols", "", nil), http.StatusOK) // reads still work
+}
+
+func TestLoginRepairsMissingAccount(t *testing.T) {
+	e := newEnv(t, nil)
+	ctx := context.Background()
+	// A registration that crashed after the user was stored but before the
+	// ledger account existed.
+	rec := UserRecord{User: User{ID: "usr_crashed", Username: "carol", Role: RoleTrader}, Salt: []byte("salt")}
+	rec.Hash = e.gw.auth.derive("correct horse", rec.Salt)
+	if err := e.gw.auth.store.CreateUser(ctx, rec); err != nil {
+		t.Fatal(err)
+	}
+	login := e.expect(e.do("POST", "/v1/auth/login", "", map[string]string{"username": "carol", "password": "correct horse"}), http.StatusOK)
+	token := login.body["token"].(string)
+	acct := e.expect(e.do("GET", "/v1/account", token, nil), http.StatusOK)
+	if num(acct.body["cash"]) != 100_000 {
+		t.Fatalf("repaired account = %v", acct.body)
+	}
+	// Logging in again must not credit starting cash twice.
+	e.expect(e.do("POST", "/v1/auth/login", "", map[string]string{"username": "carol", "password": "correct horse"}), http.StatusOK)
+	if a, _ := e.ledger.Account("usr_crashed"); a.Cash != 100_000 {
+		t.Fatalf("starting cash credited twice: %d", a.Cash)
+	}
+}
+
+func TestPrices(t *testing.T) {
+	e := newEnv(t, nil)
+	get := func(etag string) *http.Response {
+		req, _ := http.NewRequest("GET", e.srv.URL+"/v1/market/prices", nil)
+		if etag != "" {
+			req.Header.Set("If-None-Match", etag)
+		}
+		res, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { res.Body.Close() })
+		return res
+	}
+
+	res := get("")
+	var snap reporting.PriceSnapshot
+	if err := json.NewDecoder(res.Body).Decode(&snap); err != nil {
+		t.Fatal(err)
+	}
+	if res.StatusCode != 200 || len(snap.Prices) != 2 || snap.Prices[1].Price != 2000 || res.Header.Get("Access-Control-Allow-Origin") != "*" {
+		t.Fatalf("prices = %d %+v %v", res.StatusCode, snap, res.Header)
+	}
+	etag := res.Header.Get("ETag")
+	if etag != `"t0"` || res.Header.Get("Cache-Control") != "no-cache" {
+		t.Fatalf("headers = %v", res.Header)
+	}
+	if res := get(etag); res.StatusCode != http.StatusNotModified {
+		t.Fatalf("conditional GET = %d", res.StatusCode)
+	}
+
+	e.tick()
+	res = get(etag)
+	if res.StatusCode != 200 || res.Header.Get("ETag") != `"t1"` || res.Header.Get("Cache-Control") != "public, max-age=10" {
+		t.Fatalf("after tick = %d %v", res.StatusCode, res.Header)
+	}
+}
+
+func TestMarketMakerSkipsRateLimit(t *testing.T) {
+	e := newEnv(t, func(c *Config) { c.RateLimit, c.RateBurst = 1, 1 })
+	if _, err := e.gw.CreateUser(context.Background(), "mm-test", "maker password", RoleMarketMaker); err != nil {
+		t.Fatal(err)
+	}
+	login := e.expect(e.do("POST", "/v1/auth/login", "", map[string]string{"username": "mm-test", "password": "maker password"}), http.StatusOK)
+	token := login.body["token"].(string)
+	for range 5 {
+		e.expect(e.do("GET", "/v1/account", token, nil), http.StatusOK)
 	}
 }

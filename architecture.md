@@ -10,6 +10,8 @@
 
 ## 2. Container Structure
 
+Each container owns its state in its own PostgreSQL schema, and the market engine's tick results are the durable record the other containers recover from. See `docs/persistence.md`.
+
 ### API Gateway
 
 - Responsibilities:

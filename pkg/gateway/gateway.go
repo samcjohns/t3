@@ -6,6 +6,7 @@
 package gateway
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -22,22 +23,25 @@ import (
 
 	"github.com/samcjohns/t3/pkg/engine"
 	"github.com/samcjohns/t3/pkg/ledger"
+	"github.com/samcjohns/t3/pkg/listing"
 	"github.com/samcjohns/t3/pkg/reporting"
 )
 
 // Market is the market engine port.
 type Market interface {
-	Submit(engine.Order) (engine.Order, error)
+	Submit(ctx context.Context, o engine.Order) (engine.Order, error)
+	LastTick() uint64
 }
 
 // Ledger is the ledger service port.
 type Ledger interface {
-	OpenAccount(id string) error
-	Deposit(accountID string, amount int64) error
-	DepositShares(accountID, symbol string, quantity int64) error
-	Reserve(engine.Order) error
-	Release(orderID string) error
+	OpenAccount(ctx context.Context, id string) error
+	Deposit(ctx context.Context, accountID string, amount int64, reference string) error
+	DepositShares(ctx context.Context, accountID, symbol string, quantity int64, reference string) error
+	Reserve(ctx context.Context, o engine.Order) error
+	Release(ctx context.Context, orderID string) error
 	Account(id string) (ledger.Account, error)
+	LastTick() uint64
 }
 
 // Reports is the reporting service port.
@@ -47,12 +51,13 @@ type Reports interface {
 	AccountTrades(accountID string, limit int) []reporting.AccountTrade
 	Candles(symbol string, interval time.Duration, limit int) ([]reporting.Candle, error)
 	Portfolio(accountID string) (reporting.Portfolio, error)
+	Prices() *reporting.PriceBlob
 }
 
 // Config configures a Gateway. Zero values select defaults.
 type Config struct {
-	// Symbols lists the tradable symbols. Required.
-	Symbols []string
+	// Tickers lists the tradable securities. Required.
+	Tickers []listing.Ticker
 	// StartingCash is credited to each newly registered trader.
 	StartingCash int64
 	// TokenTTL is how long a login token is valid. Default 24h.
@@ -66,22 +71,26 @@ type Config struct {
 	RateBurst int
 	// AllowedOrigins lists browser origins allowed by CORS.
 	AllowedOrigins []string
-	Logger         *slog.Logger
-	Clock          func() time.Time
+	// MaxLedgerLag is how many ticks the ledger may trail the engine before
+	// order entry halts, since fills could no longer be settled. Default 3.
+	MaxLedgerLag uint64
+	// Users persists users and sessions. Defaults to an in-memory store.
+	Users  UserStore
+	Logger *slog.Logger
+	Clock  func() time.Time
 }
 
 type Gateway struct {
-	market   Market
-	ledger   Ledger
-	reports  Reports
-	cfg      Config
-	symbols  map[string]bool
-	users    *users
-	sessions *sessions
-	limiter  *limiter
-	metrics  *metrics
-	log      *slog.Logger
-	mux      *http.ServeMux
+	market  Market
+	ledger  Ledger
+	reports Reports
+	cfg     Config
+	symbols map[string]bool
+	auth    *auth
+	limiter *limiter
+	metrics *metrics
+	log     *slog.Logger
+	mux     *http.ServeMux
 }
 
 func New(market Market, ldg Ledger, reports Reports, cfg Config) *Gateway {
@@ -103,21 +112,26 @@ func New(market Market, ldg Ledger, reports Reports, cfg Config) *Gateway {
 	if cfg.Clock == nil {
 		cfg.Clock = time.Now
 	}
-	g := &Gateway{
-		market:   market,
-		ledger:   ldg,
-		reports:  reports,
-		cfg:      cfg,
-		symbols:  make(map[string]bool),
-		users:    newUsers(cfg.PasswordIterations),
-		sessions: newSessions(cfg.TokenTTL, cfg.Clock),
-		limiter:  newLimiter(cfg.RateLimit, cfg.RateBurst),
-		metrics:  newMetrics(),
-		log:      cfg.Logger,
-		mux:      http.NewServeMux(),
+	if cfg.MaxLedgerLag == 0 {
+		cfg.MaxLedgerLag = 3
 	}
-	for _, s := range cfg.Symbols {
-		g.symbols[s] = true
+	if cfg.Users == nil {
+		cfg.Users = NewMemoryUserStore()
+	}
+	g := &Gateway{
+		market:  market,
+		ledger:  ldg,
+		reports: reports,
+		cfg:     cfg,
+		symbols: make(map[string]bool),
+		auth:    newAuth(cfg.Users, cfg.PasswordIterations, cfg.TokenTTL, cfg.Clock),
+		limiter: newLimiter(cfg.RateLimit, cfg.RateBurst),
+		metrics: newMetrics(),
+		log:     cfg.Logger,
+		mux:     http.NewServeMux(),
+	}
+	for _, t := range cfg.Tickers {
+		g.symbols[t.Symbol] = true
 	}
 	g.routes()
 	return g
@@ -136,6 +150,13 @@ func (g *Gateway) routes() {
 	g.mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 	})
+	g.mux.HandleFunc("GET /readyz", func(w http.ResponseWriter, _ *http.Request) {
+		if err := g.halted(); err != nil {
+			g.writeError(w, nil, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]string{"status": "ready"})
+	})
 	g.mux.HandleFunc("GET /metrics", g.metrics.serve)
 
 	g.handle("POST /v1/auth/register", public, g.register)
@@ -148,6 +169,9 @@ func (g *Gateway) routes() {
 	g.handle("POST /v1/orders", trader, g.placeOrder)
 
 	g.handle("GET /v1/market/symbols", public, g.listSymbols)
+	// Served outside handle: the hottest public read skips token lookup and
+	// request logging.
+	g.mux.HandleFunc("GET /v1/market/prices", g.servePrices)
 	g.handle("GET /v1/market/{symbol}/quote", public, g.getQuote)
 	g.handle("GET /v1/market/{symbol}/trades", public, g.getTrades)
 	g.handle("GET /v1/market/{symbol}/candles", public, g.getCandles)
@@ -163,21 +187,60 @@ func (g *Gateway) Handler() http.Handler {
 
 // CreateUser creates a user and their ledger account. Traders receive the
 // configured starting cash.
-func (g *Gateway) CreateUser(username, password string, role Role) (User, error) {
-	u, err := g.users.create(username, password, role)
+func (g *Gateway) CreateUser(ctx context.Context, username, password string, role Role) (User, error) {
+	u, err := g.auth.createUser(ctx, username, password, role)
 	if err != nil {
 		return User{}, err
 	}
-	if err := g.ledger.OpenAccount(u.ID); err != nil {
-		g.users.remove(username)
+	if err := g.ensureAccount(ctx, u); err != nil {
+		if delErr := g.auth.store.DeleteUser(ctx, u.ID); delErr != nil {
+			g.log.Error("removing user after failed account setup", "user_id", u.ID, "err", delErr)
+		}
 		return User{}, err
 	}
-	if role == RoleTrader && g.cfg.StartingCash > 0 {
-		if err := g.ledger.Deposit(u.ID, g.cfg.StartingCash); err != nil {
-			return User{}, err
-		}
-	}
 	return u, nil
+}
+
+// EnsureUser returns the named user, creating them (and their account) if
+// they do not exist. It is for bootstrapping built-in users at startup; an
+// existing user's password and role are left unchanged.
+func (g *Gateway) EnsureUser(ctx context.Context, username, password string, role Role) (User, error) {
+	u, err := g.CreateUser(ctx, username, password, role)
+	if !errors.Is(err, ErrUsernameTaken) {
+		return u, err
+	}
+	rec, ok, err := g.auth.store.UserByName(ctx, username)
+	if err != nil {
+		return User{}, err
+	}
+	if !ok {
+		return User{}, fmt.Errorf("user %q vanished during bootstrap", username)
+	}
+	return rec.User, g.ensureAccount(ctx, rec.User)
+}
+
+// ensureAccount opens the user's ledger account and credits starting cash.
+// Both steps are idempotent, so it also repairs a registration that crashed
+// between creating the user and setting up the account.
+func (g *Gateway) ensureAccount(ctx context.Context, u User) error {
+	if err := g.ledger.OpenAccount(ctx, u.ID); err != nil && !errors.Is(err, ledger.ErrAccountExists) {
+		return err
+	}
+	if u.Role == RoleTrader && g.cfg.StartingCash > 0 {
+		return g.ledger.Deposit(ctx, u.ID, g.cfg.StartingCash, "starting-cash")
+	}
+	return nil
+}
+
+// halted reports whether order entry must stop because the ledger is too
+// far behind the engine to settle new fills.
+func (g *Gateway) halted() error {
+	engineTick, ledgerTick := g.market.LastTick(), g.ledger.LastTick()
+	if engineTick > ledgerTick+g.cfg.MaxLedgerLag {
+		return apiError{http.StatusServiceUnavailable, "market_halted",
+			fmt.Sprintf("trading is halted: settlement is %d ticks behind", engineTick-ledgerTick)}
+	}
+	return nil
 }
 
 type handlerFunc func(w http.ResponseWriter, r *http.Request, u *User) error
@@ -192,7 +255,11 @@ func (g *Gateway) handle(pattern string, acc access, h handlerFunc) {
 		err := func() error {
 			token, hasToken := bearerToken(r)
 			if hasToken {
-				if u, ok := g.sessions.lookup(token); ok {
+				u, ok, err := g.auth.lookup(r.Context(), token)
+				if err != nil {
+					return err
+				}
+				if ok {
 					user = &u
 				}
 			}
@@ -201,9 +268,12 @@ func (g *Gateway) handle(pattern string, acc access, h handlerFunc) {
 			if user != nil {
 				key = "user:" + user.ID
 			}
-			if ok, wait := g.limiter.allow(key, start); !ok {
-				rec.Header().Set("Retry-After", strconv.Itoa(int(wait.Seconds())+1))
-				return apiError{http.StatusTooManyRequests, "rate_limited", "too many requests"}
+			// Internal market makers are trusted and quote every symbol each
+			// tick, so they are exempt.
+			if user == nil || user.Role != RoleMarketMaker {
+				if err := g.rateLimit(rec, key, start); err != nil {
+					return err
+				}
 			}
 
 			switch {
@@ -228,6 +298,49 @@ func (g *Gateway) handle(pattern string, acc access, h handlerFunc) {
 		g.metrics.inc(fmt.Sprintf(`t3_gateway_requests_total{route=%q,status="%d"}`, pattern, rec.status))
 	})
 }
+
+func (g *Gateway) rateLimit(w http.ResponseWriter, key string, now time.Time) error {
+	if ok, wait := g.limiter.allow(key, now); !ok {
+		w.Header().Set("Retry-After", strconv.Itoa(int(wait.Seconds())+1))
+		return apiError{http.StatusTooManyRequests, "rate_limited", "too many requests"}
+	}
+	return nil
+}
+
+// servePrices writes the pre-encoded price snapshot. Clients that send the
+// ETag they already have get 304 until the next tick, and caches may keep
+// the response until then.
+func (g *Gateway) servePrices(w http.ResponseWriter, r *http.Request) {
+	now := g.cfg.Clock()
+	if err := g.rateLimit(w, "ip:"+clientIP(r), now); err != nil {
+		g.writeError(w, r, err)
+		g.metrics.inc(pricesLimited)
+		return
+	}
+	blob := g.reports.Prices()
+	h := w.Header()
+	h.Set("ETag", blob.ETag)
+	h.Set("Access-Control-Allow-Origin", "*") // public data, no credentials
+	if wait := blob.NextTickAt.Sub(now); wait > 0 {
+		h.Set("Cache-Control", "public, max-age="+strconv.Itoa(int(wait/time.Second)))
+	} else {
+		h.Set("Cache-Control", "no-cache")
+	}
+	if r.Header.Get("If-None-Match") == blob.ETag {
+		w.WriteHeader(http.StatusNotModified)
+		g.metrics.inc(pricesNotModified)
+		return
+	}
+	h.Set("Content-Type", "application/json")
+	w.Write(blob.JSON)
+	g.metrics.inc(pricesOK)
+}
+
+const (
+	pricesOK          = `t3_gateway_requests_total{route="GET /v1/market/prices",status="200"}`
+	pricesNotModified = `t3_gateway_requests_total{route="GET /v1/market/prices",status="304"}`
+	pricesLimited     = `t3_gateway_requests_total{route="GET /v1/market/prices",status="429"}`
+)
 
 func (g *Gateway) cors(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -294,7 +407,11 @@ func (g *Gateway) writeError(w http.ResponseWriter, r *http.Request, err error) 
 			}
 		}
 		if ae.status == http.StatusInternalServerError {
-			g.log.Error("unhandled error", "method", r.Method, "path", r.URL.Path, "err", err)
+			attrs := []any{"err", err}
+			if r != nil {
+				attrs = append(attrs, "method", r.Method, "path", r.URL.Path)
+			}
+			g.log.Error("unhandled error", attrs...)
 		}
 	}
 	writeJSON(w, ae.status, map[string]any{"error": map[string]string{"code": ae.code, "message": ae.message}})

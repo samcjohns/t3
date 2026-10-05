@@ -206,14 +206,14 @@ func pair(buys, sells []Order, buyFills, sellFills []int64, price int64) []Execu
 	return execs
 }
 
-// remainders appends each order's unfilled quantity to resting (limit) or
-// expired (market).
+// remainders appends each order's unfilled quantity to resting (GTC limit)
+// or expired (market and IOC).
 func remainders(side []Order, fills []int64, resting, expired []Order) ([]Order, []Order) {
 	for i, o := range side {
 		o.Quantity -= fills[i]
 		switch {
 		case o.Quantity == 0:
-		case o.Type == Limit:
+		case o.Type == Limit && o.TimeInForce != IOC:
 			resting = append(resting, o)
 		default:
 			expired = append(expired, o)
