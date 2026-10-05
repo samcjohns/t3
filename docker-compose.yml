@@ -35,12 +35,20 @@ services:
       T3_ADMIN_PASSWORD: ${T3_ADMIN_PASSWORD:-admin-dev-password}
       T3_MARKET_MAKER_PASSWORD: ${T3_MARKET_MAKER_PASSWORD:-maker-dev-password}
       T3_HEARTBEAT: ${T3_HEARTBEAT:-10s}
+      T3_ALLOWED_ORIGINS: ${T3_ALLOWED_ORIGINS:-}
+    healthcheck:
+      test: ["CMD", "/server", "healthcheck"]
+      interval: 5s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
 
   mm-liquidity:
     container_name: t3-mm-liquidity
     image: t3-marketmaker
     build: { context: ., target: marketmaker }
-    depends_on: [server]
+    depends_on:
+      server: { condition: service_healthy }
     restart: unless-stopped
     environment:
       T3_API_URL: http://server:8080
@@ -52,7 +60,8 @@ services:
     container_name: t3-mm-flow
     image: t3-marketmaker
     build: { context: ., target: marketmaker }
-    depends_on: [server]
+    depends_on:
+      server: { condition: service_healthy }
     restart: unless-stopped
     environment:
       T3_API_URL: http://server:8080

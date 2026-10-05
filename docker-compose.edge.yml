@@ -1,0 +1,17 @@
+# Production override: serve t3 through a reverse proxy or tunnel in another
+# Compose project instead of a host port. deploy.sh applies it when
+# T3_EDGE_NETWORK names a shared external Docker network; the proxy joins the
+# same network and reaches the API at http://t3-server:8080.
+services:
+  server:
+    ports: !reset []
+    networks: [default, edge]
+    environment:
+      # The edge network's subnet: connections from it may name the real
+      # client in CF-Connecting-IP. deploy.sh fills this in.
+      T3_TRUSTED_PROXIES: ${T3_TRUSTED_PROXIES:?set by deploy.sh}
+
+networks:
+  edge:
+    name: ${T3_EDGE_NETWORK:?}
+    external: true

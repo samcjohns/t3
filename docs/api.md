@@ -72,6 +72,8 @@ T3_PORT=8080
 
 Without them, the script warns and falls back to the development passwords in `docker-compose.yml`.
 
+To serve through a reverse proxy or tunnel in another Compose project, set `T3_EDGE_NETWORK` to a shared external Docker network. `deploy.sh` then creates that network if needed, publishes no host port, and attaches `t3-server` to it (`docker-compose.edge.yml`), so the proxy reaches the API at `http://t3-server:8080`. It also trusts `CF-Connecting-IP` from that network's subnet, so rate limits apply per real client rather than per proxy.
+
 To run the server alone in memory, with no database:
 
 ```sh
@@ -92,6 +94,7 @@ T3_ADMIN_PASSWORD=change-me go run ./cmd/server
 | `T3_ALLOWED_ORIGINS` | — | Comma-separated CORS origins |
 | `T3_ADMIN_USERNAME` | `admin` | Bootstrap admin username |
 | `T3_ADMIN_PASSWORD` | — | If unset, no admin is created |
+| `T3_TRUSTED_PROXIES` | — | Comma-separated CIDRs whose connections may name the client in `CF-Connecting-IP`. `deploy.sh` sets it in edge mode. |
 | `T3_LOG_LEVEL` | `info` | `debug`, `info`, `warn` or `error` |
 
 ## Market makers

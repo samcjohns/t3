@@ -9,7 +9,9 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
+	"net/netip"
 	"os"
 	"os/signal"
 	"strconv"
@@ -36,6 +38,7 @@ type config struct {
 	makers        []string
 	makerPassword string
 	makerCash     int64
+	proxies       []netip.Prefix
 	startingCash  int64
 	origins       []string
 	adminUsername string
@@ -71,6 +74,13 @@ func loadConfig() (config, error) {
 	if c.makerCash, err = strconv.ParseInt(env("T3_MARKET_MAKER_CASH", "500000000"), 10, 64); err != nil || c.makerCash < 0 {
 		return c, fmt.Errorf("T3_MARKET_MAKER_CASH must be a non-negative integer of cents")
 	}
+	for _, cidr := range split(os.Getenv("T3_TRUSTED_PROXIES")) {
+		p, err := netip.ParsePrefix(cidr)
+		if err != nil {
+			return c, fmt.Errorf("T3_TRUSTED_PROXIES: %w", err)
+		}
+		c.proxies = append(c.proxies, p)
+	}
 	c.tickers = listing.Default()
 	if path := os.Getenv("T3_TICKERS_FILE"); path != "" {
 		if c.tickers, err = listing.Load(path); err != nil {
@@ -98,6 +108,9 @@ func split(s string) []string {
 }
 
 func main() {
+	if len(os.Args) == 2 && os.Args[1] == "healthcheck" {
+		os.Exit(healthcheck())
+	}
 	if err := run(); err != nil {
 		slog.Error("fatal", "err", err)
 		os.Exit(1)
@@ -162,6 +175,7 @@ func run() error {
 		Tickers:        cfg.tickers,
 		StartingCash:   cfg.startingCash,
 		AllowedOrigins: cfg.origins,
+		TrustedProxies: cfg.proxies,
 		Users:          stores.users,
 		Logger:         log,
 	})
@@ -206,7 +220,7 @@ func run() error {
 			}
 		}()
 	}
-	log.Info("server started", "addr", cfg.addr, "heartbeat", cfg.heartbeat, "symbols", listing.Symbols(cfg.tickers))
+	log.Info("server started", "addr", cfg.addr, "trusted_proxies", cfg.proxies, "heartbeat", cfg.heartbeat, "symbols", listing.Symbols(cfg.tickers))
 
 	select {
 	case err := <-errc:
@@ -223,6 +237,25 @@ func run() error {
 	}
 	<-engineDone // let an in-progress tick commit before the database closes
 	return nil
+}
+
+// healthcheck probes this server's /readyz, for container health checks:
+// the image has no shell or curl. It exits 0 when ready.
+func healthcheck() int {
+	_, port, err := net.SplitHostPort(env("T3_ADDR", ":8080"))
+	if err != nil {
+		return 1
+	}
+	client := http.Client{Timeout: 3 * time.Second}
+	res, err := client.Get("http://127.0.0.1:" + port + "/readyz")
+	if err != nil {
+		return 1
+	}
+	res.Body.Close()
+	if res.StatusCode != http.StatusOK {
+		return 1
+	}
+	return 0
 }
 
 // bootstrapMakers creates each market maker user and seeds it with cash and

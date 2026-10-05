@@ -15,6 +15,7 @@ import (
 	"maps"
 	"net"
 	"net/http"
+	"net/netip"
 	"slices"
 	"strconv"
 	"strings"
@@ -74,6 +75,10 @@ type Config struct {
 	// MaxLedgerLag is how many ticks the ledger may trail the engine before
 	// order entry halts, since fills could no longer be settled. Default 3.
 	MaxLedgerLag uint64
+	// TrustedProxies are the networks whose connections may name the real
+	// client in a CF-Connecting-IP header, e.g. the Docker network shared
+	// with a Cloudflare tunnel connector.
+	TrustedProxies []netip.Prefix
 	// Users persists users and sessions. Defaults to an in-memory store.
 	Users  UserStore
 	Logger *slog.Logger
@@ -264,7 +269,7 @@ func (g *Gateway) handle(pattern string, acc access, h handlerFunc) {
 				}
 			}
 
-			key := "ip:" + clientIP(r)
+			key := "ip:" + g.clientIP(r)
 			if user != nil {
 				key = "user:" + user.ID
 			}
@@ -312,7 +317,7 @@ func (g *Gateway) rateLimit(w http.ResponseWriter, key string, now time.Time) er
 // the response until then.
 func (g *Gateway) servePrices(w http.ResponseWriter, r *http.Request) {
 	now := g.cfg.Clock()
-	if err := g.rateLimit(w, "ip:"+clientIP(r), now); err != nil {
+	if err := g.rateLimit(w, "ip:"+g.clientIP(r), now); err != nil {
 		g.writeError(w, r, err)
 		g.metrics.inc(pricesLimited)
 		return
@@ -441,12 +446,30 @@ func bearerToken(r *http.Request) (string, bool) {
 	return token, ok && token != ""
 }
 
-// clientIP is the connection's peer address. Forwarding headers are not
-// trusted; a proxy in front of the gateway must be configured for that.
-func clientIP(r *http.Request) string {
+// clientIP is the address requests are attributed to. It is the connection's
+// peer, unless that peer is a trusted proxy (such as a Cloudflare tunnel
+// connector) that supplied the original client in CF-Connecting-IP. The
+// header is ignored from anyone else, so clients cannot spoof it.
+func (g *Gateway) clientIP(r *http.Request) string {
 	host, _, err := net.SplitHostPort(r.RemoteAddr)
 	if err != nil {
-		return r.RemoteAddr
+		host = r.RemoteAddr
+	}
+	if len(g.cfg.TrustedProxies) == 0 {
+		return host
+	}
+	peer, err := netip.ParseAddr(host)
+	if err != nil {
+		return host
+	}
+	peer = peer.Unmap()
+	for _, p := range g.cfg.TrustedProxies {
+		if p.Contains(peer) {
+			if client, err := netip.ParseAddr(r.Header.Get("CF-Connecting-IP")); err == nil {
+				return client.Unmap().String()
+			}
+			break
+		}
 	}
 	return host
 }

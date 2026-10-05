@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"net/netip"
 	"strings"
 	"sync"
 	"testing"
@@ -501,5 +502,59 @@ func TestMarketMakerSkipsRateLimit(t *testing.T) {
 	token := login.body["token"].(string)
 	for range 5 {
 		e.expect(e.do("GET", "/v1/account", token, nil), http.StatusOK)
+	}
+}
+
+func TestClientIPFromTrustedProxy(t *testing.T) {
+	gw := New(nil, nil, nil, Config{TrustedProxies: []netip.Prefix{netip.MustParsePrefix("172.30.0.0/16")}})
+	cases := []struct {
+		remote, header, want string
+	}{
+		{"172.30.0.5:4000", "203.0.113.9", "203.0.113.9"},          // tunnel names the client
+		{"172.30.0.5:4000", "2001:db8::1", "2001:db8::1"},          // IPv6 clients
+		{"172.30.0.5:4000", "", "172.30.0.5"},                      // no header: the proxy itself
+		{"172.30.0.5:4000", "not-an-ip", "172.30.0.5"},             // garbage header ignored
+		{"198.51.100.7:4000", "203.0.113.9", "198.51.100.7"},       // untrusted peer cannot spoof
+		{"[::ffff:172.30.0.5]:4000", "203.0.113.9", "203.0.113.9"}, // IPv4-mapped peer
+	}
+	for _, c := range cases {
+		r := httptest.NewRequest("GET", "/", nil)
+		r.RemoteAddr = c.remote
+		if c.header != "" {
+			r.Header.Set("CF-Connecting-IP", c.header)
+		}
+		if got := gw.clientIP(r); got != c.want {
+			t.Errorf("clientIP(%s, %q) = %s, want %s", c.remote, c.header, got, c.want)
+		}
+	}
+	plain := New(nil, nil, nil, Config{})
+	r := httptest.NewRequest("GET", "/", nil)
+	r.RemoteAddr = "172.30.0.5:4000"
+	r.Header.Set("CF-Connecting-IP", "203.0.113.9")
+	if got := plain.clientIP(r); got != "172.30.0.5" {
+		t.Errorf("header trusted with no proxies configured: %s", got)
+	}
+}
+
+func TestRateLimitPerTunnelClient(t *testing.T) {
+	e := newEnv(t, func(c *Config) {
+		c.RateLimit, c.RateBurst = 1, 1
+		c.TrustedProxies = []netip.Prefix{netip.MustParsePrefix("127.0.0.0/8")}
+	})
+	get := func(client string) int {
+		req, _ := http.NewRequest("GET", e.srv.URL+"/v1/market/prices", nil)
+		req.Header.Set("CF-Connecting-IP", client)
+		res, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		res.Body.Close()
+		return res.StatusCode
+	}
+	if get("203.0.113.1") != 200 || get("203.0.113.1") != 429 {
+		t.Fatal("first client should be limited after its burst")
+	}
+	if get("203.0.113.2") != 200 {
+		t.Fatal("a second client behind the same tunnel shares the first one's limit")
 	}
 }
