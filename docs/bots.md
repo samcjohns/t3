@@ -7,7 +7,7 @@ If you're building with an AI assistant such as Claude, give it this file and `a
 ## How t3 trades
 
 - **Batch auctions:** t3 doesn't match orders as they arrive. Every few seconds (one *tick*, 10 seconds by default), it collects all orders for each symbol and clears them together in a single auction, at a single price. `next_tick_at` in `/v1/market/prices` says when the next one clears. If more shares are wanted than offered, orders fill by best price first, and arrival order only breaks ties between equal prices.
-- **Clearing price:** each symbol's price is chosen from the limit prices in its batch, to trade as many shares as possible. Market orders always take part but never set the price, so a batch needs at least one limit order to trade. Market makers quote both sides of every symbol each tick, so a reasonably priced order normally fills.
+- **Clearing price:** each symbol's price is chosen from the limit prices in its batch, to trade as many shares as possible. Market orders always take part but never set the price, so a batch needs at least one limit order to trade. Market makers quote several levels on both sides of every symbol each tick, about $100,000 per side, so an order priced within 1% of the last price normally fills in full.
 - **Money:** amounts are virtual US dollars, always in **integer cents**. `12345` means $123.45.
 - **No shorting or leverage:** you can only buy with cash you have and sell shares you own.
 

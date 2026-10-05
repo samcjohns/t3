@@ -53,8 +53,9 @@ type Order struct {
 	Direction   string `json:"direction"`
 	Type        string `json:"type"`
 	Quantity    int64  `json:"quantity"`
-	LimitPrice  int64  `json:"limit_price"`
-	TimeInForce string `json:"time_in_force"`
+	LimitPrice  int64  `json:"limit_price,omitempty"`
+	MaxCost     int64  `json:"max_cost,omitempty"`
+	TimeInForce string `json:"time_in_force,omitempty"`
 }
 
 func ioc(symbol, direction string, qty, price int64) Order {
@@ -164,33 +165,52 @@ func available(a Account) book {
 }
 
 // sizeFor converts a notional amount in cents to a share count, jittered by
-// ±50% and at least one share.
-func sizeFor(rng *rand.Rand, notional, price int64) int64 {
-	q := float64(notional) / float64(price) * (0.5 + rng.Float64())
+// ±jitter and at least one share.
+func sizeFor(rng *rand.Rand, notional, price int64, jitter float64) int64 {
+	q := float64(notional) / float64(price) * (1 - jitter + 2*jitter*rng.Float64())
 	return max(1, int64(q))
 }
 
-// Liquidity quotes a bid and an ask around each symbol's price. Its fair
-// value reverts towards the reference price, and it skews quotes against its
-// inventory so it never runs out of either side for long.
+// Level is one rung of a quote ladder.
+type Level struct {
+	// Offset is the quote's distance from fair value, as a fraction.
+	Offset float64
+	// Weight is the level's share of the side's depth, relative to the
+	// other levels.
+	Weight float64
+}
+
+// DefaultLevels put a sixth of the depth within 0.3% of fair value, so a new
+// player's whole account fills close to the last price, and the rest further
+// out, so a much larger order still fills at a worse price instead of not at
+// all.
+var DefaultLevels = []Level{{0.0015, 1}, {0.003, 2}, {0.006, 3}, {0.012, 5}, {0.025, 9}}
+
+// Liquidity quotes a ladder of bids and asks around each symbol's price. Its
+// fair value reverts towards the reference price, and it skews quotes against
+// its inventory so it never runs out of either side for long.
 type Liquidity struct {
 	Reference map[string]int64
-	// HalfSpread is each quote's distance from fair value. Default 0.15%.
-	HalfSpread float64
+	// Levels is the ladder quoted on each side. Default DefaultLevels.
+	Levels []Level
+	// Depth is the total notional quoted on each side of each symbol, in
+	// cents. Default $100,000.
+	Depth int64
 	// Reversion pulls fair value towards the reference each tick. Default 2%.
 	Reversion float64
 	// MaxSkew is the largest inventory skew of fair value. Default 0.5%.
 	MaxSkew float64
-	// Notional is the typical quote size in cents. Default $2,000.
-	Notional int64
+	// MaxLean caps how far fair value sits from the last price, so the
+	// inner levels stay where players expect to trade. Default 0.5%.
+	MaxLean float64
 
 	rng    *rand.Rand
 	target map[string]int64
 }
 
 func NewLiquidity(tickers []Ticker, seed uint64) *Liquidity {
-	l := &Liquidity{Reference: map[string]int64{}, HalfSpread: 0.0015, Reversion: 0.02, MaxSkew: 0.005, Notional: 200_000,
-		rng: rand.New(rand.NewPCG(seed, 1))}
+	l := &Liquidity{Reference: map[string]int64{}, Levels: DefaultLevels, Depth: 10_000_000,
+		Reversion: 0.02, MaxSkew: 0.005, MaxLean: 0.005, rng: rand.New(rand.NewPCG(seed, 1))}
 	for _, t := range tickers {
 		l.Reference[t.Symbol] = t.ReferencePrice
 	}
@@ -203,26 +223,39 @@ func (l *Liquidity) Orders(snap Snapshot, acct Account) []Order {
 		// The first inventory seen is the level the maker steers back to.
 		l.target = maps.Clone(b.shares)
 	}
+	var weights float64
+	for _, lv := range l.Levels {
+		weights += lv.Weight
+	}
 	var out []Order
 	for _, p := range snap.Prices {
 		ref, ok := l.Reference[p.Symbol]
 		if !ok || p.Price <= 0 {
 			continue
 		}
-		fair := float64(p.Price) + l.Reversion*float64(ref-p.Price)
+		last := float64(p.Price)
+		fair := last + l.Reversion*(float64(ref)-last)
 		if target := l.target[p.Symbol]; target > 0 {
 			excess := float64(b.shares[p.Symbol]-target) / float64(target)
 			fair *= 1 - l.MaxSkew*math.Max(-1, math.Min(1, excess))
 		}
-		bid := int64(math.Floor(fair * (1 - l.HalfSpread)))
-		ask := max(bid+1, int64(math.Ceil(fair*(1+l.HalfSpread))))
+		fair = math.Max(last*(1-l.MaxLean), math.Min(last*(1+l.MaxLean), fair))
 
-		if qty := min(sizeFor(l.rng, l.Notional, bid), b.cash/max(1, bid)); bid > 0 && qty > 0 {
-			out = append(out, ioc(p.Symbol, "BUY", qty, bid))
-			b.cash -= qty * bid
-		}
-		if qty := min(sizeFor(l.rng, l.Notional, ask), b.shares[p.Symbol]); qty > 0 {
-			out = append(out, ioc(p.Symbol, "SELL", qty, ask))
+		// Each level is strictly outside the one before it, even where
+		// rounding to whole cents would merge them.
+		bid, ask := int64(math.MaxInt64), int64(0)
+		for _, lv := range l.Levels {
+			notional := int64(float64(l.Depth) * lv.Weight / weights)
+			bid = min(bid-1, int64(math.Floor(fair*(1-lv.Offset))))
+			ask = max(ask+1, int64(math.Ceil(fair*(1+lv.Offset))))
+			if qty := min(sizeFor(l.rng, notional, max(1, bid), 0.2), b.cash/max(1, bid)); bid > 0 && qty > 0 {
+				out = append(out, ioc(p.Symbol, "BUY", qty, bid))
+				b.cash -= qty * bid
+			}
+			if qty := min(sizeFor(l.rng, notional, ask, 0.2), b.shares[p.Symbol]); qty > 0 {
+				out = append(out, ioc(p.Symbol, "SELL", qty, ask))
+				b.shares[p.Symbol] -= qty
+			}
 		}
 	}
 	return out
@@ -260,7 +293,7 @@ func (f *Flow) Orders(snap Snapshot, acct Account) []Order {
 		if p.Price <= 0 || f.rng.Float64() >= f.Activity {
 			continue
 		}
-		qty := sizeFor(f.rng, f.Notional, p.Price)
+		qty := sizeFor(f.rng, f.Notional, p.Price, 0.5)
 		buy := f.rng.Float64() < (1+s)/2
 		if limit := int64(math.Ceil(float64(p.Price) * (1 + f.Aggression))); buy {
 			if qty = min(qty, b.cash/limit); qty > 0 {

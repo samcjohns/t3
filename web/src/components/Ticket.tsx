@@ -13,26 +13,33 @@ interface Props {
 
 /** Headroom over the last price that a market buy's default max cost allows. */
 const MARKET_SLIPPAGE = 1.05;
+/**
+ * How far past the last price a limit order is placed by default. The market
+ * makers quote well within this, so the default order fills, and it pays the
+ * auction's clearing price rather than its limit.
+ */
+const LIMIT_REACH = 0.01;
 
 export function Ticket({ api, price, portfolio, secondsToAuction, onPlaced }: Props) {
 	const [side, setSide] = useState<Direction>('BUY');
 	const [type, setType] = useState<OrderType>('LIMIT');
 	const [tif, setTif] = useState<TimeInForce>('IOC');
 	const [qty, setQty] = useState('10');
-	const [limit, setLimit] = useState(dollarsInput(price.price));
+	const [limit, setLimit] = useState('');
 	const [maxCost, setMaxCost] = useState('');
 	const [busy, setBusy] = useState(false);
 	const [result, setResult] = useState<{ ok: boolean; text: string } | null>(null);
 
 	// A new symbol starts from its own price.
 	useEffect(() => {
-		setLimit(dollarsInput(price.price));
+		setLimit('');
 		setMaxCost('');
 		setResult(null);
 	}, [price.symbol]);
 
 	const quantity = /^\d+$/.test(qty) ? Number(qty) : NaN;
-	const limitCents = parseDollars(limit);
+	const autoLimit = side === 'BUY' ? Math.ceil(price.price * (1 + LIMIT_REACH)) : Math.max(1, Math.floor(price.price * (1 - LIMIT_REACH)));
+	const limitCents = limit.trim() === '' ? autoLimit : parseDollars(limit);
 	const autoMaxCost = Number.isFinite(quantity) ? Math.ceil(quantity * price.price * MARKET_SLIPPAGE) : 0;
 	const maxCostCents = maxCost.trim() === '' ? autoMaxCost : parseDollars(maxCost);
 
@@ -106,8 +113,9 @@ export function Ticket({ api, price, portfolio, secondsToAuction, onPlaced }: Pr
 						<span>Limit price</span>
 						<div class="affix">
 							<i>$</i>
-							<input inputMode="decimal" value={limit} onInput={(e) => setLimit(e.currentTarget.value)} />
+							<input inputMode="decimal" value={limit} placeholder={dollarsInput(autoLimit)} onInput={(e) => setLimit(e.currentTarget.value)} />
 						</div>
+						<small>Everyone in the auction trades at one clearing price, which can be better than your limit.</small>
 					</label>
 					<label>
 						<span>Time in force</span>

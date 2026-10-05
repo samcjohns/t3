@@ -139,9 +139,9 @@ There is no endpoint to list or cancel open orders yet, so the order ticket defa
 
 ## Market makers
 
-`cmd/marketmaker` runs one market maker per process against this API. Each one is configured with `T3_API_URL`, `T3_MM_USERNAME`, `T3_MM_PASSWORD`, `T3_MM_STRATEGY` (`liquidity` or `flow`) and an optional `T3_MM_SEED`.
+`cmd/marketmaker` runs one market maker per process against this API. Each one is configured with `T3_API_URL`, `T3_MM_USERNAME`, `T3_MM_PASSWORD`, `T3_MM_STRATEGY` (`liquidity` or `flow`), an optional `T3_MM_SEED` and, for `liquidity`, an optional `T3_MM_DEPTH`.
 
-- **`liquidity`** quotes an IOC bid and ask around every price. Its fair value drifts back toward the reference price, and it skews quotes against its inventory.
+- **`liquidity`** quotes a five-level ladder of IOC bids and asks around every price, from 0.15% to 2.5% away. Each side totals `T3_MM_DEPTH` cents (default $100,000), with about $15,000 within 0.3%, so a new player's whole $10,000 fills near the last price and larger orders fill at a worse price instead of not at all. Its fair value drifts back toward the reference price, and it skews quotes against its inventory, but it stays within 0.5% of the last price.
 - **`flow`** is a noise trader. Each tick it crosses the spread on about half the symbols, steered by a slowly wandering sentiment per symbol.
 
 Both send only IOC orders, so nothing they place ever rests in the book.

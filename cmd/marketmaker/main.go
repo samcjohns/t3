@@ -57,7 +57,13 @@ func run(log *slog.Logger) error {
 	var s marketmaker.Strategy
 	switch strategy {
 	case "liquidity":
-		s = marketmaker.NewLiquidity(tickers, seed)
+		l := marketmaker.NewLiquidity(tickers, seed)
+		if v := os.Getenv("T3_MM_DEPTH"); v != "" {
+			if l.Depth, err = strconv.ParseInt(v, 10, 64); err != nil || l.Depth <= 0 {
+				return fmt.Errorf("T3_MM_DEPTH must be a positive integer of cents")
+			}
+		}
+		s = l
 	case "flow":
 		s = marketmaker.NewFlow(seed)
 	default:

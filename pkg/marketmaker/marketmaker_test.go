@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	"math"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -19,7 +20,7 @@ var ctx = context.Background()
 
 func TestLiquidityQuotesWithinFunds(t *testing.T) {
 	l := NewLiquidity([]Ticker{{"ACME", 1000}, {"ZED", 500}}, 1)
-	acct := Account{Cash: 1_000, Holdings: []struct {
+	acct := Account{Cash: 100_000, Holdings: []struct {
 		Symbol   string `json:"symbol"`
 		Quantity int64  `json:"quantity"`
 		Held     int64  `json:"held"`
@@ -28,15 +29,16 @@ func TestLiquidityQuotesWithinFunds(t *testing.T) {
 
 	var spent int64
 	bids := map[string]int64{}
+	sold := map[string]int64{}
 	for _, o := range l.Orders(snap, acct) {
 		if o.TimeInForce != "IOC" || o.Symbol == "UNLISTED" {
 			t.Fatalf("bad order %+v", o)
 		}
 		if o.Direction == "BUY" {
 			spent += o.Quantity * o.LimitPrice
-			bids[o.Symbol] = o.LimitPrice
+			bids[o.Symbol] = max(bids[o.Symbol], o.LimitPrice)
 		} else {
-			if o.Symbol != "ACME" || o.Quantity > 3 {
+			if sold[o.Symbol] += o.Quantity; o.Symbol != "ACME" || sold[o.Symbol] > 3 {
 				t.Fatalf("sell beyond holdings: %+v", o)
 			}
 			if o.LimitPrice <= bids["ACME"] {
@@ -44,8 +46,8 @@ func TestLiquidityQuotesWithinFunds(t *testing.T) {
 			}
 		}
 	}
-	if spent > 1_000 {
-		t.Fatalf("bids need %d cash, have 1000", spent)
+	if spent > 100_000 {
+		t.Fatalf("bids need %d cash, have 100000", spent)
 	}
 }
 
@@ -60,10 +62,17 @@ func TestFlowRespectsFunds(t *testing.T) {
 	}
 }
 
-// TestMakersMoveThePrice runs both strategies against a real in-process
-// exchange over HTTP and checks that prices move with no other traders,
-// stay near their references, and that the books balance.
-func TestMakersMoveThePrice(t *testing.T) {
+// exchange is a real in-process exchange, served over HTTP, with both makers
+// seeded as in production.
+type exchange struct {
+	gw          *gateway.Gateway
+	eng         *engine.Orchestrator
+	url         string
+	totalCash   int64
+	totalShares map[string]int64
+}
+
+func newExchange(t *testing.T) *exchange {
 	tickers := listing.Default()
 	ldg := ledger.New()
 	reports := reporting.New(ldg, reporting.Config{Listing: tickers, Heartbeat: 10 * time.Second})
@@ -73,12 +82,11 @@ func TestMakersMoveThePrice(t *testing.T) {
 		}
 		reports.Ingest(tr)
 	}})
-	gw := gateway.New(eng, ldg, reports, gateway.Config{Tickers: tickers, PasswordIterations: 1, RateLimit: 1e6, RateBurst: 1e6, Logger: slog.New(slog.DiscardHandler)})
+	gw := gateway.New(eng, ldg, reports, gateway.Config{Tickers: tickers, StartingCash: 1_000_000, PasswordIterations: 1, RateLimit: 1e6, RateBurst: 1e6, Logger: slog.New(slog.DiscardHandler)})
 	srv := httptest.NewServer(gw.Handler())
 	t.Cleanup(srv.Close)
 
-	var totalCash int64
-	totalShares := map[string]int64{}
+	x := &exchange{gw: gw, eng: eng, url: srv.URL, totalShares: map[string]int64{}}
 	for _, name := range []string{"mm-liquidity", "mm-flow"} {
 		u, err := gw.EnsureUser(ctx, name, "maker password", gateway.RoleMarketMaker)
 		if err != nil {
@@ -87,17 +95,25 @@ func TestMakersMoveThePrice(t *testing.T) {
 		if err := ldg.Deposit(ctx, u.ID, 500_000_000, "seed-cash"); err != nil {
 			t.Fatal(err)
 		}
-		totalCash += 500_000_000
+		x.totalCash += 500_000_000
 		for _, tk := range tickers {
 			if err := ldg.DepositShares(ctx, u.ID, tk.Symbol, tk.MakerShares, "seed:"+tk.Symbol); err != nil {
 				t.Fatal(err)
 			}
-			totalShares[tk.Symbol] += tk.MakerShares
+			x.totalShares[tk.Symbol] += tk.MakerShares
 		}
 	}
+	return x
+}
 
-	liqClient := NewHTTPClient(srv.URL, "mm-liquidity", "maker password")
-	flowClient := NewHTTPClient(srv.URL, "mm-flow", "maker password")
+// TestMakersMoveThePrice runs both strategies against a real in-process
+// exchange over HTTP and checks that prices move with no other traders,
+// stay near their references, and that the books balance.
+func TestMakersMoveThePrice(t *testing.T) {
+	x := newExchange(t)
+
+	liqClient := NewHTTPClient(x.url, "mm-liquidity", "maker password")
+	flowClient := NewHTTPClient(x.url, "mm-flow", "maker password")
 	listed, err := liqClient.Tickers(ctx)
 	if err != nil || len(listed) != 10 {
 		t.Fatalf("Tickers = %d, %v", len(listed), err)
@@ -121,7 +137,7 @@ func TestMakersMoveThePrice(t *testing.T) {
 		trade(ctx, liqClient, liq, snap, log)
 		fsnap, _ := flowClient.Prices(ctx)
 		trade(ctx, flowClient, flow, fsnap, log)
-		tr, err := eng.Tick(ctx)
+		tr, err := x.eng.Tick(ctx)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -150,7 +166,7 @@ func TestMakersMoveThePrice(t *testing.T) {
 	var cash int64
 	shares := map[string]int64{}
 	for _, name := range []string{"mm-liquidity", "mm-flow"} {
-		c := NewHTTPClient(srv.URL, name, "maker password")
+		c := NewHTTPClient(x.url, name, "maker password")
 		a, err := c.Account(ctx)
 		if err != nil {
 			t.Fatal(err)
@@ -163,14 +179,128 @@ func TestMakersMoveThePrice(t *testing.T) {
 			shares[h.Symbol] += h.Quantity
 		}
 	}
-	if cash != totalCash {
-		t.Errorf("cash %d, want %d", cash, totalCash)
+	if cash != x.totalCash {
+		t.Errorf("cash %d, want %d", cash, x.totalCash)
 	}
-	for sym, n := range totalShares {
+	for sym, n := range x.totalShares {
 		if shares[sym] != n {
 			t.Errorf("%s shares %d, want %d", sym, shares[sym], n)
 		}
 	}
+}
+
+// TestNewTradersFill checks the makers keep the books deep enough that a new
+// player can move their whole starting $10,000 into any symbol and back out,
+// using the web ticket's default prices, and every order fills in full within
+// 1% of the last price.
+func TestNewTradersFill(t *testing.T) {
+	x := newExchange(t)
+	liqClient := NewHTTPClient(x.url, "mm-liquidity", "maker password")
+	flowClient := NewHTTPClient(x.url, "mm-flow", "maker password")
+	listed, err := liqClient.Tickers(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	liq, flow := NewLiquidity(listed, 7), NewFlow(8)
+	log := slog.New(slog.DiscardHandler)
+
+	// One trader per symbol, so every book is tested in the same auctions.
+	traders := map[string]*HTTPClient{}
+	for _, tk := range listed {
+		name := "new-" + strings.ToLower(tk.Symbol)
+		if _, err := x.gw.CreateUser(ctx, name, "trader password", gateway.RoleTrader); err != nil {
+			t.Fatal(err)
+		}
+		traders[tk.Symbol] = NewHTTPClient(x.url, name, "trader password")
+	}
+
+	type pending struct {
+		order  Order
+		price  int64
+		before Account
+	}
+	const warmup = 20
+	for i := range warmup + 80 {
+		snap, err := liqClient.Prices(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		trade(ctx, liqClient, liq, snap, log)
+		trade(ctx, flowClient, flow, snap, log)
+
+		// Each trader cycles all in by market order, all out by market
+		// order, all in by limit, all out by limit.
+		placed := map[string]pending{}
+		for _, p := range snap.Prices {
+			if i < warmup {
+				break
+			}
+			c := traders[p.Symbol]
+			a, err := c.Account(ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			cash, held := a.Cash-a.CashHeld, holding(a, p.Symbol)
+			var o Order
+			switch (i - warmup) % 4 {
+			case 0:
+				// The ticket's default max cost is 5% over the last price.
+				qty := int64(float64(cash) / (float64(p.Price) * 1.05))
+				o = Order{Symbol: p.Symbol, Direction: "BUY", Type: "MARKET", Quantity: qty, MaxCost: int64(math.Ceil(float64(qty*p.Price) * 1.05))}
+			case 1:
+				o = Order{Symbol: p.Symbol, Direction: "SELL", Type: "MARKET", Quantity: held}
+			case 2:
+				limit := int64(math.Ceil(float64(p.Price) * 1.01))
+				o = ioc(p.Symbol, "BUY", cash/limit, limit)
+			case 3:
+				o = ioc(p.Symbol, "SELL", held, int64(math.Floor(float64(p.Price)*0.99)))
+			}
+			if err := c.PlaceOrder(ctx, o); err != nil {
+				t.Fatalf("tick %d: placing %+v: %v", i, o, err)
+			}
+			placed[p.Symbol] = pending{o, p.Price, a}
+		}
+
+		if _, err := x.eng.Tick(ctx); err != nil {
+			t.Fatal(err)
+		}
+
+		for sym, pd := range placed {
+			a, err := traders[sym].Account(ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			o := pd.order
+			if a.CashHeld != 0 {
+				t.Errorf("tick %d: %s %s %s left %d cash held", i, o.Type, o.Direction, sym, a.CashHeld)
+			}
+			filled := holding(a, sym) - holding(pd.before, sym)
+			paid := pd.before.Cash - a.Cash
+			if o.Direction == "SELL" {
+				filled, paid = -filled, -paid
+			}
+			if filled != o.Quantity {
+				t.Errorf("tick %d: %s %s %d %s ($%d) filled %d", i, o.Type, o.Direction, o.Quantity, sym, o.Quantity*pd.price/100, filled)
+				continue
+			}
+			slip := float64(paid)/float64(filled)/float64(pd.price) - 1
+			if o.Direction == "SELL" {
+				slip = -slip
+			}
+			if slip > 0.01 {
+				t.Errorf("tick %d: %s %s %d %s filled %.2f%% worse than %d", i, o.Type, o.Direction, filled, sym, slip*100, pd.price)
+			}
+		}
+	}
+}
+
+func holding(a Account, symbol string) int64 {
+	for _, h := range a.Holdings {
+		if h.Symbol == symbol {
+			return h.Quantity
+		}
+	}
+	return 0
 }
 
 func TestRunTradesOncePerTick(t *testing.T) {
