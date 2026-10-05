@@ -1,8 +1,13 @@
 # Local development stack. Passwords default to development values; override
-# them with environment variables for anything shared.
+# them with environment variables (or a .env file) for anything shared.
+# Every container, image and volume is named for the t3 project.
+name: t3
+
 services:
   postgres:
+    container_name: t3-postgres
     image: postgres:17-alpine
+    restart: unless-stopped
     environment:
       POSTGRES_DB: t3
       POSTGRES_PASSWORD: ${T3_POSTGRES_PASSWORD:-postgres-dev}
@@ -15,7 +20,10 @@ services:
       retries: 30
 
   server:
+    container_name: t3-server
+    image: t3-server
     build: { context: ., target: server }
+    restart: unless-stopped
     depends_on:
       postgres: { condition: service_healthy }
     ports:
@@ -29,6 +37,8 @@ services:
       T3_HEARTBEAT: ${T3_HEARTBEAT:-10s}
 
   mm-liquidity:
+    container_name: t3-mm-liquidity
+    image: t3-marketmaker
     build: { context: ., target: marketmaker }
     depends_on: [server]
     restart: unless-stopped
@@ -39,6 +49,8 @@ services:
       T3_MM_STRATEGY: liquidity
 
   mm-flow:
+    container_name: t3-mm-flow
+    image: t3-marketmaker
     build: { context: ., target: marketmaker }
     depends_on: [server]
     restart: unless-stopped
@@ -50,3 +62,4 @@ services:
 
 volumes:
   pgdata:
+    name: t3-pgdata

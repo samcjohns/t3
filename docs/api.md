@@ -60,11 +60,17 @@ Order entry returns `503 market_halted` if the ledger falls more than 3 ticks be
 
 ## Running
 
-The full stack (Postgres, the server and two market makers) runs with:
+To deploy, run `./deploy.sh`. It pulls the latest code (`git pull --ff-only`), builds the images, starts the full stack (`t3-postgres`, `t3-server`, `t3-mm-liquidity` and `t3-mm-flow`), and waits until `/readyz` reports ready. Use `--skip-pull` to deploy the current checkout.
+
+Put secrets in a git-ignored `.env` file next to the script:
 
 ```sh
-docker compose up --build
+T3_ADMIN_PASSWORD=...
+T3_MARKET_MAKER_PASSWORD=...
+T3_PORT=8080
 ```
+
+Without them, the script warns and falls back to the development passwords in `docker-compose.yml`.
 
 To run the server alone in memory, with no database:
 
