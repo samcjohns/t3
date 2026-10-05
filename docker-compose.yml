@@ -74,6 +74,32 @@ services:
       T3_MM_PASSWORD: ${T3_MARKET_MAKER_PASSWORD:-maker-dev-password}
       T3_MM_STRATEGY: flow
 
+  mm-momentum:
+    container_name: t3-mm-momentum
+    image: t3-marketmaker
+    build: { context: ., target: marketmaker }
+    depends_on:
+      server: { condition: service_healthy }
+    restart: unless-stopped
+    environment:
+      T3_API_URL: http://server:8080
+      T3_MM_USERNAME: mm-momentum
+      T3_MM_PASSWORD: ${T3_MARKET_MAKER_PASSWORD:-maker-dev-password}
+      T3_MM_STRATEGY: momentum
+
+  mm-news:
+    container_name: t3-mm-news
+    image: t3-marketmaker
+    build: { context: ., target: marketmaker }
+    depends_on:
+      server: { condition: service_healthy }
+    restart: unless-stopped
+    environment:
+      T3_API_URL: http://server:8080
+      T3_MM_USERNAME: mm-news
+      T3_MM_PASSWORD: ${T3_MARKET_MAKER_PASSWORD:-maker-dev-password}
+      T3_MM_STRATEGY: news
+
   web:
     container_name: t3-web
     image: t3-web

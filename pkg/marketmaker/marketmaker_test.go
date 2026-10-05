@@ -62,7 +62,93 @@ func TestFlowRespectsFunds(t *testing.T) {
 	}
 }
 
-// exchange is a real in-process exchange, served over HTTP, with both makers
+var makers = []string{"mm-liquidity", "mm-flow", "mm-momentum", "mm-news"}
+
+func TestMomentumFollowsTheTrend(t *testing.T) {
+	m := NewMomentum([]Ticker{{"ACME", 1000}}, 1)
+	m.Activity, m.MaxDeviation = 1, 0.2
+	acct := Account{Cash: 10_000_000, Holdings: []struct {
+		Symbol   string `json:"symbol"`
+		Quantity int64  `json:"quantity"`
+		Held     int64  `json:"held"`
+	}{{"ACME", 100_000, 0}}}
+	dirs := func(price int64) map[string]int {
+		n := map[string]int{}
+		for _, o := range m.Orders(Snapshot{Prices: []Price{{"ACME", price}}}, acct) {
+			n[o.Direction]++
+		}
+		return n
+	}
+	for price := int64(1000); price <= 1100; price += 10 {
+		if d := dirs(price); d["SELL"] > 0 {
+			t.Fatalf("sold into a rally at %d", price)
+		}
+	}
+	if d := dirs(1110); d["BUY"] != 1 {
+		t.Fatalf("not buying a rally: %v", d)
+	}
+	// Beyond MaxDeviation it stops chasing.
+	for price := int64(1150); price <= 1300; price += 25 {
+		if d := dirs(price); price > 1200 && d["BUY"] > 0 {
+			t.Fatalf("bought at %d, beyond MaxDeviation", price)
+		}
+	}
+	// Once the averages cross on the way down, it sells.
+	var sold int
+	for price := int64(1300); price >= 900; price -= 20 {
+		d := dirs(price)
+		if price < 1100 && d["BUY"] > 0 {
+			t.Fatalf("bought into a slide at %d", price)
+		}
+		sold += d["SELL"]
+	}
+	if sold == 0 {
+		t.Fatal("never sold a slide")
+	}
+}
+
+func TestNewsTargetsStayBounded(t *testing.T) {
+	n := NewNews([]Ticker{{"ACME", 1000}}, 1)
+	n.Rate, n.MaxDeviation = 1, 0.3
+	acct := Account{Cash: 1_000_000_000, Holdings: []struct {
+		Symbol   string `json:"symbol"`
+		Quantity int64  `json:"quantity"`
+		Held     int64  `json:"held"`
+	}{{"ACME", 1_000_000, 0}}}
+	var ups, downs int
+	for i := range 2000 {
+		price := int64(700 + i%601)
+		for _, o := range n.Orders(Snapshot{Prices: []Price{{"ACME", price}}}, acct) {
+			if o.TimeInForce != "IOC" {
+				t.Fatalf("bad order %+v", o)
+			}
+			if o.Direction == "BUY" {
+				ups++
+				if o.LimitPrice > 1300 {
+					t.Fatalf("bought at %d, beyond MaxDeviation", o.LimitPrice)
+				}
+			} else {
+				downs++
+				if o.LimitPrice < 700 {
+					t.Fatalf("sold at %d, beyond MaxDeviation", o.LimitPrice)
+				}
+			}
+		}
+		if s, ok := n.stories["ACME"]; ok && (s.target < 700 || s.target > 1300) {
+			t.Fatalf("target %d beyond MaxDeviation", s.target)
+		}
+	}
+	if ups == 0 || downs == 0 {
+		t.Fatalf("one-sided news: %d up, %d down", ups, downs)
+	}
+	for range 50 {
+		for _, o := range n.Orders(Snapshot{Prices: []Price{{"ACME", 1000}}}, Account{}) {
+			t.Fatalf("order with no funds: %+v", o)
+		}
+	}
+}
+
+// exchange is a real in-process exchange, served over HTTP, with every maker
 // seeded as in production.
 type exchange struct {
 	gw          *gateway.Gateway
@@ -87,7 +173,7 @@ func newExchange(t *testing.T) *exchange {
 	t.Cleanup(srv.Close)
 
 	x := &exchange{gw: gw, eng: eng, url: srv.URL, totalShares: map[string]int64{}}
-	for _, name := range []string{"mm-liquidity", "mm-flow"} {
+	for _, name := range makers {
 		u, err := gw.EnsureUser(ctx, name, "maker password", gateway.RoleMarketMaker)
 		if err != nil {
 			t.Fatal(err)
@@ -106,37 +192,52 @@ func newExchange(t *testing.T) *exchange {
 	return x
 }
 
-// TestMakersMoveThePrice runs both strategies against a real in-process
+// running is a strategy trading as its maker account.
+type running struct {
+	client   *HTTPClient
+	strategy Strategy
+}
+
+// startMakers logs every maker in with its production strategy.
+func startMakers(t *testing.T, x *exchange) []running {
+	c := NewHTTPClient(x.url, "mm-liquidity", "maker password")
+	listed, err := c.Tickers(ctx)
+	if err != nil || len(listed) != 10 {
+		t.Fatalf("Tickers = %d, %v", len(listed), err)
+	}
+	return []running{
+		{c, NewLiquidity(listed, 7)},
+		{NewHTTPClient(x.url, "mm-flow", "maker password"), NewFlow(8)},
+		{NewHTTPClient(x.url, "mm-momentum", "maker password"), NewMomentum(listed, 9)},
+		{NewHTTPClient(x.url, "mm-news", "maker password"), NewNews(listed, 10)},
+	}
+}
+
+// TestMakersMoveThePrice runs every strategy against a real in-process
 // exchange over HTTP and checks that prices move with no other traders,
 // stay near their references, and that the books balance.
 func TestMakersMoveThePrice(t *testing.T) {
 	x := newExchange(t)
-
-	liqClient := NewHTTPClient(x.url, "mm-liquidity", "maker password")
-	flowClient := NewHTTPClient(x.url, "mm-flow", "maker password")
-	listed, err := liqClient.Tickers(ctx)
-	if err != nil || len(listed) != 10 {
-		t.Fatalf("Tickers = %d, %v", len(listed), err)
-	}
-	liq, flow := NewLiquidity(listed, 7), NewFlow(8)
+	running := startMakers(t, x)
 	log := slog.New(slog.DiscardHandler)
 
 	moved := map[string]bool{}
 	start := map[string]int64{}
+	low, high := map[string]int64{}, map[string]int64{}
 	var traded int
-	for i := range 200 {
-		snap, err := liqClient.Prices(ctx)
+	for i := range 500 {
+		snap, err := running[0].client.Prices(ctx)
 		if err != nil {
 			t.Fatal(err)
 		}
 		if i == 0 {
 			for _, p := range snap.Prices {
-				start[p.Symbol] = p.Price
+				start[p.Symbol], low[p.Symbol], high[p.Symbol] = p.Price, p.Price, p.Price
 			}
 		}
-		trade(ctx, liqClient, liq, snap, log)
-		fsnap, _ := flowClient.Prices(ctx)
-		trade(ctx, flowClient, flow, fsnap, log)
+		for _, r := range running {
+			trade(ctx, r.client, r.strategy, snap, log)
+		}
 		tr, err := x.eng.Tick(ctx)
 		if err != nil {
 			t.Fatal(err)
@@ -145,6 +246,8 @@ func TestMakersMoveThePrice(t *testing.T) {
 			if b.Volume > 0 {
 				traded++
 				moved[b.Symbol] = moved[b.Symbol] || b.ClearingPrice != start[b.Symbol]
+				low[b.Symbol] = min(low[b.Symbol], b.ClearingPrice)
+				high[b.Symbol] = max(high[b.Symbol], b.ClearingPrice)
 			}
 		}
 	}
@@ -152,20 +255,24 @@ func TestMakersMoveThePrice(t *testing.T) {
 	if len(moved) != 10 {
 		t.Fatalf("only %d of 10 symbols moved: %v", len(moved), moved)
 	}
-	if traded < 500 {
-		t.Fatalf("only %d book clears in 200 ticks", traded)
+	if traded < 1250 {
+		t.Fatalf("only %d book clears in 500 ticks", traded)
 	}
-	end, _ := liqClient.Prices(ctx)
-	for _, p := range end.Prices {
-		drift := math.Abs(float64(p.Price-start[p.Symbol])) / float64(start[p.Symbol])
-		if drift > 0.25 {
-			t.Errorf("%s drifted %.0f%% in 200 ticks", p.Symbol, drift*100)
+	var ranges float64
+	for sym, s := range start {
+		r := float64(high[sym]-low[sym]) / float64(s)
+		ranges += r
+		if float64(high[sym]) > float64(s)*1.25 || float64(low[sym]) < float64(s)*0.75 {
+			t.Errorf("%s ranged %d to %d from %d in 500 ticks", sym, low[sym], high[sym], s)
 		}
+	}
+	if avg := ranges / float64(len(start)); avg < 0.03 {
+		t.Errorf("average range %.1f%% in 500 ticks; prices barely fluctuate", avg*100)
 	}
 
 	var cash int64
 	shares := map[string]int64{}
-	for _, name := range []string{"mm-liquidity", "mm-flow"} {
+	for _, name := range makers {
 		c := NewHTTPClient(x.url, name, "maker password")
 		a, err := c.Account(ctx)
 		if err != nil {
@@ -195,13 +302,11 @@ func TestMakersMoveThePrice(t *testing.T) {
 // 1% of the last price.
 func TestNewTradersFill(t *testing.T) {
 	x := newExchange(t)
-	liqClient := NewHTTPClient(x.url, "mm-liquidity", "maker password")
-	flowClient := NewHTTPClient(x.url, "mm-flow", "maker password")
-	listed, err := liqClient.Tickers(ctx)
+	running := startMakers(t, x)
+	listed, err := running[0].client.Tickers(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
-	liq, flow := NewLiquidity(listed, 7), NewFlow(8)
 	log := slog.New(slog.DiscardHandler)
 
 	// One trader per symbol, so every book is tested in the same auctions.
@@ -221,12 +326,13 @@ func TestNewTradersFill(t *testing.T) {
 	}
 	const warmup = 20
 	for i := range warmup + 80 {
-		snap, err := liqClient.Prices(ctx)
+		snap, err := running[0].client.Prices(ctx)
 		if err != nil {
 			t.Fatal(err)
 		}
-		trade(ctx, liqClient, liq, snap, log)
-		trade(ctx, flowClient, flow, snap, log)
+		for _, r := range running {
+			trade(ctx, r.client, r.strategy, snap, log)
+		}
 
 		// Each trader cycles all in by market order, all out by market
 		// order, all in by limit, all out by limit.

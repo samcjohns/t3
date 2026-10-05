@@ -66,8 +66,12 @@ func run(log *slog.Logger) error {
 		s = l
 	case "flow":
 		s = marketmaker.NewFlow(seed)
+	case "momentum":
+		s = marketmaker.NewMomentum(tickers, seed)
+	case "news":
+		s = marketmaker.NewNews(tickers, seed)
 	default:
-		return fmt.Errorf("T3_MM_STRATEGY must be liquidity or flow")
+		return fmt.Errorf("T3_MM_STRATEGY must be liquidity, flow, momentum or news")
 	}
 	log.Info("market maker started", "api", api, "symbols", len(tickers))
 	return marketmaker.Run(ctx, client, s, marketmaker.Config{Logger: log})

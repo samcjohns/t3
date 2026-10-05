@@ -76,7 +76,7 @@ History is rebuilt by rewinding the account's current balances through its fills
 
 ## Running
 
-To deploy, run `./deploy.sh`. It pulls the latest code (`git pull --ff-only`), builds the images, starts the full stack (`t3-postgres`, `t3-server`, `t3-mm-liquidity`, `t3-mm-flow` and `t3-web`), and waits until the server's `/readyz` and the web app report healthy. Use `--skip-pull` to deploy the current checkout. Locally, the web app is at `http://localhost:3000` and the API at `http://localhost:8080`.
+To deploy, run `./deploy.sh`. It pulls the latest code (`git pull --ff-only`), builds the images, starts the full stack (`t3-postgres`, `t3-server`, `t3-mm-liquidity`, `t3-mm-flow`, `t3-mm-momentum`, `t3-mm-news` and `t3-web`), and waits until the server's `/readyz` and the web app report healthy. Use `--skip-pull` to deploy the current checkout. Locally, the web app is at `http://localhost:3000` and the API at `http://localhost:8080`.
 
 Put secrets in a git-ignored `.env` file next to the script:
 
@@ -111,7 +111,7 @@ T3_ADMIN_PASSWORD=change-me go run ./cmd/server
 | `T3_TICKERS_FILE` | — | A JSON listing to use instead of the 10 built-in example tickers (`pkg/listing`) |
 | `T3_DATABASE_URL` | — | Postgres URL for every service. If unset (and no per-service URL is set), state is in memory only. |
 | `T3_ENGINE_DATABASE_URL`, `T3_LEDGER_DATABASE_URL`, `T3_GATEWAY_DATABASE_URL` | `T3_DATABASE_URL` | Per-service URLs, one role each |
-| `T3_MARKET_MAKERS` | `mm-liquidity,mm-flow` | Market maker accounts to bootstrap |
+| `T3_MARKET_MAKERS` | `mm-liquidity,mm-flow,mm-momentum,mm-news` | Market maker accounts to bootstrap |
 | `T3_MARKET_MAKER_PASSWORD` | — | If unset, no market makers are created |
 | `T3_MARKET_MAKER_CASH` | `500000000` | Cents seeded to each market maker; shares come from the listing |
 | `T3_STARTING_CASH` | `1000000` | Cents credited to each new trader |
@@ -141,9 +141,13 @@ There is no endpoint to list or cancel open orders yet, so the order ticket defa
 
 ## Market makers
 
-`cmd/marketmaker` runs one market maker per process against this API. Each one is configured with `T3_API_URL`, `T3_MM_USERNAME`, `T3_MM_PASSWORD`, `T3_MM_STRATEGY` (`liquidity` or `flow`), an optional `T3_MM_SEED` and, for `liquidity`, an optional `T3_MM_DEPTH`.
+`cmd/marketmaker` runs one market maker per process against this API. Each one is configured with `T3_API_URL`, `T3_MM_USERNAME`, `T3_MM_PASSWORD`, `T3_MM_STRATEGY` (`liquidity`, `flow`, `momentum` or `news`), an optional `T3_MM_SEED` and, for `liquidity`, an optional `T3_MM_DEPTH`.
 
 - **`liquidity`** quotes a five-level ladder of IOC bids and asks around every price, from 0.15% to 2.5% away. Each side totals `T3_MM_DEPTH` cents (default $100,000), with about $15,000 within 0.3%, so a new player's whole $10,000 fills near the last price and larger orders fill at a worse price instead of not at all. Its fair value drifts back toward the reference price, and it skews quotes against its inventory, but it stays within 0.5% of the last price.
 - **`flow`** is a noise trader. Each tick it crosses the spread on about half the symbols, steered by a slowly wandering sentiment per symbol.
+- **`momentum`** follows trends. It compares a fast and a slow moving average of each price and trades up to $5,000 in the direction of the gap, so moves that start tend to run for a while. It stops chasing once a price is 10% from its reference.
+- **`news`** trades on imaginary headlines. About once every 100 ticks per symbol, a story sets a target 2–8% away, and it trades about $20,000 a tick towards it for 3–10 ticks. Stories are likelier to push a price back towards its reference, and never target more than 20% from it.
 
-Both send only IOC orders, so nothing they place ever rests in the book.
+`momentum` and `news` cross the spread by at most 0.4% and 0.6%, inside the 1% a player's order needs to fill in full, so a player's order at that price has priority over theirs in the auction.
+
+All of them send only IOC orders, so nothing they place ever rests in the book.

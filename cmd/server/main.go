@@ -55,7 +55,7 @@ type config struct {
 func loadConfig() (config, error) {
 	c := config{
 		addr:          env("T3_ADDR", ":8080"),
-		makers:        split(env("T3_MARKET_MAKERS", "mm-liquidity,mm-flow")),
+		makers:        split(env("T3_MARKET_MAKERS", "mm-liquidity,mm-flow,mm-momentum,mm-news")),
 		makerPassword: os.Getenv("T3_MARKET_MAKER_PASSWORD"),
 		origins:       split(os.Getenv("T3_ALLOWED_ORIGINS")),
 		adminUsername: env("T3_ADMIN_USERNAME", "admin"),

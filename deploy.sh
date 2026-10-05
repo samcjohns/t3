@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Pulls the latest code, then builds and (re)starts the whole t3 stack:
-# Postgres, the server, both market makers and the web app.
+# Postgres, the server, the market makers and the web app.
 #
 # Usage: ./deploy.sh [--skip-pull]
 #
