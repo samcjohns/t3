@@ -28,6 +28,8 @@ services:
       postgres: { condition: service_healthy }
     ports:
       - "${T3_PORT:-8080}:8080"
+    volumes:
+      - archive:/var/lib/t3/archive
     environment:
       T3_ENGINE_DATABASE_URL: postgres://t3_engine:engine-dev@postgres:5432/t3?sslmode=disable
       T3_LEDGER_DATABASE_URL: postgres://t3_ledger:ledger-dev@postgres:5432/t3?sslmode=disable
@@ -35,6 +37,7 @@ services:
       T3_ADMIN_PASSWORD: ${T3_ADMIN_PASSWORD:-admin-dev-password}
       T3_MARKET_MAKER_PASSWORD: ${T3_MARKET_MAKER_PASSWORD:-maker-dev-password}
       T3_HEARTBEAT: ${T3_HEARTBEAT:-10s}
+      T3_ARCHIVE_DIR: /var/lib/t3/archive
       # Browser origins that may call the API: the web app, plus any other
       # sites that use it.
       T3_ALLOWED_ORIGINS: ${T3_ALLOWED_ORIGINS:-http://localhost:${T3_WEB_PORT:-3000}}
@@ -90,3 +93,5 @@ services:
 volumes:
   pgdata:
     name: t3-pgdata
+  archive:
+    name: t3-archive

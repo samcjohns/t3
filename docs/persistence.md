@@ -84,11 +84,23 @@ sessions (token_digest bytea primary key, user_id text not null, expires_at time
 | Engine | Load orders with status `pending` or `resting` into the books, in sequence order, then restore the sequence and tick counters. |
 | Ledger | Load the account state, then catch up by fetching ticks after `last_tick` from the engine. Then reconcile holds (see below). |
 | Gateway | Nothing to do. Users and sessions are read on demand. |
-| Reporting | Replay all `tick_results`. |
+| Reporting | Replay all `tick_results`, including compacted ones. |
 
 **Hold reconciliation.** A hold uses the same ID as its order. Any hold older than a grace period (30 s) whose order the engine doesn't know about is an orphan of failure 2, and gets released. The ledger runs this check on startup and periodically. The engine port needs a call that reports which of a given set of order IDs it knows.
 
 **Registration** writes to two services: the gateway's user record and the ledger account. Opening the ledger account and crediting the starting cash must both be safe to retry. The starting-cash entry is unique per account, so a crash in between is repaired on the user's next login instead of leaving a user without a usable account.
+
+### Compaction
+
+Most stored rows are never read again: market makers place about 100 IOC orders a tick, and nearly all of them expire unfilled. Without cleanup the database grows by about 430 MB a day. So once a day of history is older than `T3_COMPACT_AFTER` (default 24 hours), and the ledger has applied all of it, the server compacts it. It checks hourly, and handles one whole UTC day at a time, in one transaction:
+
+1. **Archive.** The day's original `tick_results` go to `ticks-YYYY-MM-DD.jsonl.gz` in `T3_ARCHIVE_DIR`, gzipped to about a third of their size. The random order IDs keep them from compressing further. The file is written and synced before anything is changed.
+2. **Slim ticks.** Each tick's result keeps only the books that traded, and their `expired_order_ids` are emptied. Every price, volume and execution stays, so the ledger and reporting service still recover from `tick_results` as before.
+3. **Delete unfilled orders.** Orders that expired without filling at all are deleted from `engine.orders`. Their holds were already released when the ledger applied their tick, so hold reconciliation never asks about them. The newest order is always kept, so the sequence counter can't go backwards.
+
+`engine.compaction.through_tick` records progress. If a compaction fails, nothing in the database changes, and the next run archives that day again, replacing the file.
+
+What is lost from the database is only what no service reads: books in which nothing traded, the IDs of expired orders, and orders that never traded. The archive keeps all of it, for audits or replaying the market from the start. Postgres reuses the freed space rather than returning it to the disk, so tables stop growing but don't shrink. Run `VACUUM FULL` once if the space is needed back.
 
 ## Consequences
 

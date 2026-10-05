@@ -120,6 +120,8 @@ T3_ADMIN_PASSWORD=change-me go run ./cmd/server
 | `T3_ADMIN_PASSWORD` | — | If unset, no admin is created |
 | `T3_TRUSTED_PROXIES` | — | Comma-separated CIDRs whose connections may name the client in `CF-Connecting-IP`. `deploy.sh` sets it in edge mode. |
 | `T3_LOG_LEVEL` | `info` | `debug`, `info`, `warn` or `error` |
+| `T3_COMPACT_AFTER` | `24h` | How old a day of engine history must be before it is compacted (see [persistence](persistence.md#compaction)). `0` disables compaction. |
+| `T3_ARCHIVE_DIR` | — | Where compaction keeps each day's original ticks. Compose sets it to the `t3-archive` volume. If unset, they are discarded. |
 
 ## Web app
 

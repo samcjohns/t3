@@ -39,7 +39,8 @@ type Snapshot struct {
 type Journal interface {
 	Load(ctx context.Context) (Snapshot, error)
 	// AcceptOrder records a new pending order. It returns an error wrapping
-	// ErrDuplicateOrderID if the ID has ever been used.
+	// ErrDuplicateOrderID if the ID has been used by an order the journal
+	// still holds. Compaction may forget orders that expired unfilled.
 	AcceptOrder(ctx context.Context, o Order) error
 	// CommitTick atomically records a tick's result and the resulting state
 	// of every order whose state changed.
@@ -47,7 +48,8 @@ type Journal interface {
 	// TicksAfter returns up to limit committed ticks after the given tick, in
 	// order.
 	TicksAfter(ctx context.Context, after uint64, limit int) ([]TickResult, error)
-	// KnownOrders reports which of ids have ever been accepted.
+	// KnownOrders reports which of ids have been accepted, excluding orders
+	// that compaction has forgotten.
 	KnownOrders(ctx context.Context, ids []string) (map[string]bool, error)
 }
 

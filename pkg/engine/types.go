@@ -94,7 +94,8 @@ type TickResult struct {
 	Tick      uint64    `json:"tick"`
 	Timestamp time.Time `json:"timestamp"`
 	// Books holds one entry per symbol that had orders in the batch,
-	// sorted by symbol.
+	// sorted by symbol. Once a tick is compacted, its stored result keeps
+	// only the books that traded, with ExpiredOrderIDs emptied.
 	Books []BookResult `json:"books"`
 }
 

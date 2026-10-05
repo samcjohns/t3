@@ -21,6 +21,7 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/samcjohns/t3/internal/tickarchive"
 	"github.com/samcjohns/t3/pkg/engine"
 	enginepg "github.com/samcjohns/t3/pkg/engine/postgres"
 	"github.com/samcjohns/t3/pkg/gateway"
@@ -47,6 +48,8 @@ type config struct {
 	engineDB      string
 	ledgerDB      string
 	gatewayDB     string
+	compactAfter  time.Duration
+	archiveDir    string
 }
 
 func loadConfig() (config, error) {
@@ -60,10 +63,14 @@ func loadConfig() (config, error) {
 		engineDB:      env("T3_ENGINE_DATABASE_URL", os.Getenv("T3_DATABASE_URL")),
 		ledgerDB:      env("T3_LEDGER_DATABASE_URL", os.Getenv("T3_DATABASE_URL")),
 		gatewayDB:     env("T3_GATEWAY_DATABASE_URL", os.Getenv("T3_DATABASE_URL")),
+		archiveDir:    os.Getenv("T3_ARCHIVE_DIR"),
 	}
 	var err error
 	if c.heartbeat, err = time.ParseDuration(env("T3_HEARTBEAT", engine.DefaultHeartbeat.String())); err != nil || c.heartbeat <= 0 {
 		return c, fmt.Errorf("T3_HEARTBEAT must be a positive duration")
+	}
+	if c.compactAfter, err = time.ParseDuration(env("T3_COMPACT_AFTER", "24h")); err != nil || c.compactAfter < 0 {
+		return c, fmt.Errorf("T3_COMPACT_AFTER must be a non-negative duration")
 	}
 	if c.startingCash, err = strconv.ParseInt(env("T3_STARTING_CASH", "1000000"), 10, 64); err != nil || c.startingCash < 0 {
 		return c, fmt.Errorf("T3_STARTING_CASH must be a non-negative integer of cents")
@@ -220,6 +227,13 @@ func run() error {
 			}
 		}()
 	}
+	if stores.engine != nil && cfg.compactAfter > 0 {
+		archive, err := archiver(cfg, log)
+		if err != nil {
+			return err
+		}
+		go compactLoop(ctx, log, stores.engine, ldg, cfg.compactAfter, archive)
+	}
 	log.Info("server started", "addr", cfg.addr, "trusted_proxies", cfg.proxies, "heartbeat", cfg.heartbeat, "symbols", listing.Symbols(cfg.tickers))
 
 	select {
@@ -302,6 +316,40 @@ func settle(log *slog.Logger, ldg *ledger.Ledger, eng *engine.Orchestrator, tr e
 	}
 }
 
+// archiver returns where compaction archives each day's original ticks, or
+// nil to discard them.
+func archiver(cfg config, log *slog.Logger) (enginepg.ArchiveFunc, error) {
+	if cfg.archiveDir == "" {
+		log.Warn("T3_ARCHIVE_DIR not set; compaction discards expired order IDs without archiving the original ticks")
+		return nil, nil
+	}
+	if err := os.MkdirAll(cfg.archiveDir, 0o750); err != nil {
+		return nil, fmt.Errorf("T3_ARCHIVE_DIR: %w", err)
+	}
+	return tickarchive.Dir(cfg.archiveDir).Write, nil
+}
+
+// compactLoop compacts each day of engine history once it is older than
+// after and the ledger has settled it, checking hourly.
+func compactLoop(ctx context.Context, log *slog.Logger, j *enginepg.Journal, ldg *ledger.Ledger, after time.Duration, archive enginepg.ArchiveFunc) {
+	t := time.NewTicker(time.Hour)
+	defer t.Stop()
+	for {
+		days, err := j.Compact(ctx, time.Now().UTC().Add(-after), ldg.LastTick(), archive)
+		for _, d := range days {
+			log.Info("compacted history", "day", d.Day.Format(time.DateOnly), "ticks", d.LastTick-d.FirstTick+1, "orders_deleted", d.OrdersDeleted)
+		}
+		if err != nil && ctx.Err() == nil {
+			log.Error("compacting history; retrying next hour", "err", err)
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+		}
+	}
+}
+
 func reconcile(ctx context.Context, log *slog.Logger, ldg *ledger.Ledger, eng *engine.Orchestrator) {
 	released, err := ldg.ReconcileHolds(ctx, eng, 30*time.Second)
 	if err != nil {
@@ -315,8 +363,10 @@ func reconcile(ctx context.Context, log *slog.Logger, ldg *ledger.Ledger, eng *e
 
 type stores struct {
 	journal engine.Journal
-	ledger  ledger.Store
-	users   gateway.UserStore
+	// engine is journal's Postgres implementation, which can also compact.
+	engine *enginepg.Journal
+	ledger ledger.Store
+	users  gateway.UserStore
 }
 
 // openStores connects each service to its own database role. Without any
@@ -350,9 +400,10 @@ func openStores(ctx context.Context, cfg config, log *slog.Logger) (stores, func
 	if err != nil {
 		return fail(err)
 	}
-	if s.journal, err = enginepg.NewJournal(ctx, p); err != nil {
+	if s.engine, err = enginepg.NewJournal(ctx, p); err != nil {
 		return fail(err)
 	}
+	s.journal = s.engine
 	if p, err = connect("ledger", cfg.ledgerDB); err != nil {
 		return fail(err)
 	}
