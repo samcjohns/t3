@@ -47,6 +47,22 @@ export function Ticket({ api, price, portfolio, secondsToAuction, onPlaced }: Pr
 	const pos = portfolio?.positions.find((p) => p.symbol === price.symbol);
 	const sharesAvailable = pos ? pos.quantity - pos.held : 0;
 
+	// The most shares the account can fund: everything it holds for a sell, what
+	// its cash covers at the last price for a market buy, and at the entered
+	// limit for a limit buy. Null until a limit buy has a limit to size against.
+	let maxQty: number | null = null;
+	if (portfolio) {
+		if (side === 'SELL') maxQty = sharesAvailable;
+		else if (type === 'MARKET') maxQty = price.price > 0 ? Math.floor(cashAvailable / price.price) : 0;
+		else if (limit.trim() !== '' && limitCents !== null && limitCents > 0) maxQty = Math.floor(cashAvailable / limitCents);
+	}
+	const fillMax = () => {
+		if (maxQty === null || maxQty < 1) return;
+		setQty(String(maxQty));
+		// A market buy fills as many shares as its max cost covers, so spend it all.
+		if (side === 'BUY' && type === 'MARKET') setMaxCost(dollarsInput(cashAvailable));
+	};
+
 	let estimate: number | null = null;
 	if (Number.isFinite(quantity)) {
 		if (type === 'LIMIT' && limitCents !== null) estimate = quantity * limitCents;
@@ -104,7 +120,20 @@ export function Ticket({ api, price, portfolio, secondsToAuction, onPlaced }: Pr
 
 			<label>
 				<span>Shares</span>
-				<input inputMode="numeric" value={qty} onInput={(e) => setQty(e.currentTarget.value.trim())} />
+				<div class="with-max">
+					<input inputMode="numeric" value={qty} onInput={(e) => setQty(e.currentTarget.value.trim())} />
+					{portfolio && (
+						<button
+							type="button"
+							class="max"
+							disabled={maxQty === null || maxQty < 1}
+							title={maxQty === null ? 'Enter a limit price first' : side === 'BUY' ? 'Buy as many shares as your cash covers' : 'Sell every share you have available'}
+							onClick={fillMax}
+						>
+							{side === 'BUY' ? 'Max' : 'All'}
+						</button>
+					)}
+				</div>
 			</label>
 
 			{type === 'LIMIT' ? (

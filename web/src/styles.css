@@ -811,6 +811,27 @@ select:focus {
 	padding-left: 24px;
 }
 
+.with-max {
+	display: flex;
+	gap: 6px;
+}
+.with-max .max {
+	padding: 0 12px;
+	border: 1px solid var(--line);
+	border-radius: 8px;
+	background: var(--panel-2);
+	color: var(--accent);
+	font-size: 12px;
+	font-weight: 600;
+}
+.with-max .max:hover:not(:disabled) {
+	border-color: var(--accent);
+}
+.with-max .max:disabled {
+	color: var(--muted);
+	opacity: 0.6;
+}
+
 .ticket-sums {
 	display: flex;
 	flex-direction: column;
