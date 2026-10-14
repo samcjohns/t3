@@ -15,6 +15,7 @@ import (
 	"maps"
 	"math"
 	"math/rand/v2"
+	"slices"
 	"time"
 )
 
@@ -70,6 +71,9 @@ type Client interface {
 	Account(ctx context.Context) (Account, error)
 	PlaceOrder(ctx context.Context, o Order) error
 	PublishNews(ctx context.Context, a Article) error
+	// ClaimNewsAlerts returns the news admins have broken since the last
+	// claim, by anyone.
+	ClaimNewsAlerts(ctx context.Context) ([]NewsAlert, error)
 }
 
 // Strategy decides a tick's orders. It may keep state between calls.
@@ -82,6 +86,19 @@ type Strategy interface {
 type Publisher interface {
 	// Articles returns the articles written since the last call.
 	Articles() []Article
+}
+
+// Alerted is a strategy that trades on news admins break. Run claims the
+// alerts before each call to Orders.
+type Alerted interface {
+	Alert(alerts []NewsAlert)
+}
+
+// NewsAlert is admin news: move Symbol's price to Target. Its article is
+// already published.
+type NewsAlert struct {
+	Symbol string `json:"symbol"`
+	Target int64  `json:"target"`
 }
 
 // Article is a news story in the public API's shape.
@@ -144,6 +161,13 @@ func trade(ctx context.Context, c Client, s Strategy, snap Snapshot, log *slog.L
 	if err != nil {
 		log.Warn("fetching account", "err", err)
 		return 0, 0
+	}
+	if a, ok := s.(Alerted); ok {
+		if alerts, err := c.ClaimNewsAlerts(ctx); err != nil {
+			log.Warn("claiming news alerts", "err", err)
+		} else if len(alerts) > 0 {
+			a.Alert(alerts)
+		}
 	}
 	orders := s.Orders(snap, acct)
 	if p, ok := s.(Publisher); ok {
@@ -442,7 +466,8 @@ func (m *Momentum) Orders(snap Snapshot, acct Account) []Order {
 // for a few ticks, giving the price a sudden jump the other makers then
 // absorb. News is more likely to push a price back towards its reference
 // than further away, and never sets a target beyond MaxDeviation from it.
-// Each headline is published as an Article.
+// Each headline is published as an Article. Admin news (see Alert) runs
+// like a headline of its own, unbounded by MaxDeviation.
 type News struct {
 	Reference map[string]int64
 	// Rate is the chance of news per symbol per tick. Default 1%.
@@ -467,6 +492,7 @@ type News struct {
 	rng      *rand.Rand
 	stories  map[string]story
 	articles []Article
+	alerts   []NewsAlert
 }
 
 type story struct {
@@ -486,6 +512,7 @@ func NewNews(tickers []Ticker, seed uint64) *News {
 
 func (n *News) Orders(snap Snapshot, acct Account) []Order {
 	b := available(acct)
+	n.startAlerts(snap)
 	var out []Order
 	for _, p := range snap.Prices {
 		ref, ok := n.Reference[p.Symbol]
@@ -518,6 +545,28 @@ func (n *News) Orders(snap Snapshot, acct Account) []Order {
 		}
 	}
 	return out
+}
+
+// Alert queues admin news to trade on from the next call to Orders. Each
+// replaces any story already running for its symbol.
+func (n *News) Alert(alerts []NewsAlert) {
+	n.alerts = append(n.alerts, alerts...)
+}
+
+// startAlerts turns queued alerts into stories, running long enough to reach
+// the target at Aggression per tick with time to spare for resistance from
+// the other makers.
+func (n *News) startAlerts(snap Snapshot) {
+	for _, a := range n.alerts {
+		i := slices.IndexFunc(snap.Prices, func(p Price) bool { return p.Symbol == a.Symbol })
+		if i < 0 || a.Target <= 0 || snap.Prices[i].Price <= 0 {
+			continue
+		}
+		gap := math.Abs(deviation(a.Target, snap.Prices[i].Price))
+		ticks := n.MaxTicks + 2*int(math.Ceil(gap/n.Aggression))
+		n.stories[a.Symbol] = story{target: a.Target, ticks: ticks}
+	}
+	n.alerts = nil
 }
 
 func (n *News) Articles() []Article {

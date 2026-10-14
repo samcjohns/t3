@@ -229,6 +229,19 @@ func TestAdminOnly(t *testing.T) {
 	}
 	e.expect(e.do("POST", "/v1/admin/accounts/"+id+"/shares", admin, map[string]any{"symbol": "NOPE", "quantity": 5}), http.StatusBadRequest)
 	e.expect(e.do("POST", "/v1/admin/accounts/usr_ghost/cash", admin, map[string]int64{"amount": 5}), http.StatusNotFound)
+
+	r = e.expect(e.do("POST", "/v1/admin/accounts/"+id+"/cash", admin, map[string]int64{"amount": -100_000}), http.StatusOK)
+	if num(r.body["cash"]) != 5 {
+		t.Fatalf("after withdrawal: %v", r.body)
+	}
+	e.expect(e.do("POST", "/v1/admin/accounts/"+id+"/cash", admin, map[string]int64{"amount": -6}), http.StatusUnprocessableEntity)
+	e.expect(e.do("POST", "/v1/admin/accounts/"+id+"/cash", admin, map[string]int64{"amount": 0}), http.StatusBadRequest)
+
+	e.expect(e.do("GET", "/v1/admin/users", token, nil), http.StatusForbidden)
+	users := e.expect(e.do("GET", "/v1/admin/users", admin, nil), http.StatusOK).body["users"].([]any)
+	if len(users) != 1 || users[0].(map[string]any)["username"] != "alice" || num(users[0].(map[string]any)["cash"]) != 5 {
+		t.Fatalf("users = %v", users)
+	}
 }
 
 func TestTradingEndToEnd(t *testing.T) {
@@ -719,4 +732,44 @@ func TestNews(t *testing.T) {
 		t.Fatalf("ACME news = %v", acme)
 	}
 	e.expect(e.do("GET", "/v1/news?symbol=NOPE", "", nil), http.StatusNotFound)
+}
+
+func TestAdminNews(t *testing.T) {
+	e := newEnv(t, nil)
+	if _, err := e.gw.CreateUser(context.Background(), "mm-news", "maker password", RoleMarketMaker); err != nil {
+		t.Fatal(err)
+	}
+	maker := e.expect(e.do("POST", "/v1/auth/login", "", map[string]string{"username": "mm-news", "password": "maker password"}), http.StatusOK).body["token"].(string)
+	trader, _ := e.trader("alice")
+	admin := e.admin()
+
+	story := map[string]any{"symbol": "ACME", "change": -12.5, "headline": "ACME recalls every anvil"}
+	e.expect(e.do("POST", "/v1/admin/news", trader, story), http.StatusForbidden)
+	e.expect(e.do("POST", "/v1/admin/news", maker, story), http.StatusForbidden)
+	for _, bad := range []map[string]any{
+		{"symbol": "NOPE", "change": 5, "headline": "x"},
+		{"symbol": "ACME", "change": 0, "headline": "x"},
+		{"symbol": "ACME", "change": 51, "headline": "x"},
+		{"symbol": "ACME", "change": 5, "headline": " "},
+	} {
+		e.expect(e.do("POST", "/v1/admin/news", admin, bad), http.StatusBadRequest)
+	}
+
+	// ACME has never traded, so the move is from its reference price.
+	a := e.expect(e.do("POST", "/v1/admin/news", admin, story), http.StatusCreated).body
+	if num(a["price"]) != 1000 || num(a["target"]) != 875 || a["headline"] != "ACME recalls every anvil" {
+		t.Fatalf("article = %v", a)
+	}
+	if news := e.expect(e.do("GET", "/v1/news", "", nil), http.StatusOK).body["articles"].([]any); len(news) != 1 {
+		t.Fatalf("news = %v", news)
+	}
+
+	e.expect(e.do("POST", "/v1/news/alerts/claim", trader, nil), http.StatusForbidden)
+	alerts := e.expect(e.do("POST", "/v1/news/alerts/claim", maker, nil), http.StatusOK).body["alerts"].([]any)
+	if len(alerts) != 1 || alerts[0].(map[string]any)["symbol"] != "ACME" || num(alerts[0].(map[string]any)["target"]) != 875 {
+		t.Fatalf("alerts = %v", alerts)
+	}
+	if again := e.expect(e.do("POST", "/v1/news/alerts/claim", maker, nil), http.StatusOK).body["alerts"].([]any); len(again) != 0 {
+		t.Fatalf("alerts claimed twice: %v", again)
+	}
 }

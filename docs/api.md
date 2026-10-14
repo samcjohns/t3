@@ -35,12 +35,15 @@ To trade from your own code, see [bots.md](bots.md).
 | `GET /v1/leaderboard?limit=` | — | Traders ranked by account value, highest first, as `{tick, starting_cash, traders, standings, you}`. Each standing has `rank`, `username`, `total_value` and `gain` (value less starting cash), and equal values share a rank. `you` is the caller's own standing when a trader token is sent, even outside the limit, and `null` otherwise. Admins and market makers are not ranked. Standings are computed once per tick, so a new trader appears after the next auction. |
 | `GET /v1/news?symbol=&limit=` | — | Market news, newest first, as `{articles}`. Each article has `id`, `tick`, `time`, `symbol`, `headline`, an optional `body`, the symbol's `price` when the story broke and the `target` price it moves towards. `symbol` filters to one symbol. |
 | `POST /v1/news` | market maker | `{symbol, headline, body?, price, target}`: publishes an article, returning `201` with it. The headline is 1–200 characters and the body at most 4,000. The `news` market maker calls this for each story it starts. Admins may also publish. |
+| `POST /v1/news/alerts/claim` | market maker | Takes the queued admin news as `{alerts}`, each `{symbol, target}`. The `news` market maker claims these every tick and trades each symbol towards its target. The queue is in memory, so unclaimed alerts are lost on restart. |
 | `GET /v1/market/symbols` | — | The tradable symbols, each with `name` and `reference_price`. |
 | `GET /v1/market/prices` | — | Every symbol's current price, as one pre-built snapshot that changes once per tick. It supports `ETag`/`If-None-Match`, which returns `304` while unchanged. |
 | `GET /v1/market/{symbol}/quote` | — | Last clearing price. Returns `404` if the symbol hasn't traded yet. |
 | `GET /v1/market/{symbol}/trades?limit=` | — | The public tape, newest first, with no account or order IDs. |
 | `GET /v1/market/{symbol}/candles?interval=&limit=` | — | OHLCV candles, oldest first. `interval` is one of `1m`, `5m`, `15m`, `1h` or `1d`. |
-| `POST /v1/admin/accounts/{id}/cash` | admin | `{amount}`: credits cash. |
+| `GET /v1/admin/users` | admin | Every trader as `{users}`, each with `id`, `username`, `cash`, `cash_held` and `total_value`. |
+| `POST /v1/admin/accounts/{id}/cash` | admin | `{amount}`: credits cash, or debits it when negative. A debit can't exceed the cash not held for open orders (`422 insufficient_funds`). Returns the account. |
+| `POST /v1/admin/news` | admin | `{symbol, change, headline, body?}`: publishes an article and queues an alert for the `news` market maker to move the price by `change` percent (non-zero, at most 50 either way) from the last price, returning `201` with the article. The web app's `#/admin` page uses this. |
 | `POST /v1/admin/accounts/{id}/shares` | admin | `{symbol, quantity}`: credits shares. |
 | `GET /healthz` | — | Liveness check. Not rate limited. |
 | `GET /readyz` | — | Returns `503 market_halted` while the ledger is too far behind to settle trades. |

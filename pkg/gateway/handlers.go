@@ -317,10 +317,17 @@ func (g *Gateway) depositCash(w http.ResponseWriter, r *http.Request, u *User) e
 		return err
 	}
 	id := r.PathValue("id")
-	if err := g.ledger.Deposit(r.Context(), id, req.Amount, ""); err != nil {
+	// A negative amount removes cash.
+	var err error
+	if req.Amount < 0 {
+		err = g.ledger.Withdraw(r.Context(), id, -req.Amount, "")
+	} else {
+		err = g.ledger.Deposit(r.Context(), id, req.Amount, "")
+	}
+	if err != nil {
 		return err
 	}
-	g.log.Info("admin cash deposit", "admin_id", u.ID, "account_id", id, "amount", req.Amount)
+	g.log.Info("admin cash adjustment", "admin_id", u.ID, "account_id", id, "amount", req.Amount)
 	return g.getAccount(w, r, &User{ID: id})
 }
 

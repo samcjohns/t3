@@ -150,6 +150,27 @@ func TestNewsTargetsStayBounded(t *testing.T) {
 	}
 }
 
+// TestNewsAlert checks admin news drives the price to its target, even past
+// MaxDeviation, without writing an article of its own.
+func TestNewsAlert(t *testing.T) {
+	n := NewNews([]Ticker{{"ACME", 1000}}, 1)
+	n.Rate = 0
+	acct := Account{Cash: 1_000_000_000}
+	n.Alert([]NewsAlert{{"ACME", 1500}, {"NOPE", 10}})
+	for price := int64(1000); price < 1500; price += 5 {
+		orders := n.Orders(Snapshot{Prices: []Price{{"ACME", price}}}, acct)
+		if len(orders) != 1 || orders[0].Direction != "BUY" || orders[0].LimitPrice > 1500 {
+			t.Fatalf("at %d: orders %+v", price, orders)
+		}
+	}
+	if o := n.Orders(Snapshot{Prices: []Price{{"ACME", 1500}}}, acct); len(o) != 0 {
+		t.Fatalf("at target: orders %+v", o)
+	}
+	if a := n.Articles(); len(a) != 0 {
+		t.Fatalf("articles %+v", a)
+	}
+}
+
 func TestPlainHeadline(t *testing.T) {
 	for _, c := range []struct {
 		price, target int64
@@ -507,6 +528,9 @@ func (f *fakeClient) Prices(context.Context) (Snapshot, error) {
 func (f *fakeClient) Account(context.Context) (Account, error)   { return Account{}, nil }
 func (f *fakeClient) PlaceOrder(context.Context, Order) error    { return nil }
 func (f *fakeClient) PublishNews(context.Context, Article) error { return nil }
+func (f *fakeClient) ClaimNewsAlerts(context.Context) ([]NewsAlert, error) {
+	return nil, nil
+}
 
 type countingStrategy struct{ calls int }
 

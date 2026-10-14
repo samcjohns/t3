@@ -42,6 +42,7 @@ type EntryKind string
 
 const (
 	EntryDeposit      EntryKind = "deposit"
+	EntryWithdrawal   EntryKind = "withdrawal"
 	EntryShareDeposit EntryKind = "share_deposit"
 	EntryBuy          EntryKind = "buy"
 	EntrySell         EntryKind = "sell"

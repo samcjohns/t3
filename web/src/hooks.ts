@@ -105,16 +105,18 @@ export function useSession(api: Api) {
 	return [session, setSession] as const;
 }
 
-export type Page = 'trade' | 'portfolio' | 'leaderboard' | 'news';
+export type Page = 'trade' | 'portfolio' | 'leaderboard' | 'news' | 'admin';
 
 /**
  * The page and symbol in the URL hash: #/ACME for a symbol's trading view,
- * #/portfolio, #/leaderboard or #/news. All survive reloads and can be linked.
+ * #/portfolio, #/leaderboard, #/news or #/admin. All survive reloads and can be linked.
  */
+const PAGES: string[] = ['portfolio', 'leaderboard', 'news', 'admin'];
+
 export function useRoute() {
 	const read = () => {
 		const path = decodeURIComponent(location.hash.replace(/^#\/?/, ''));
-		return path === 'portfolio' || path === 'leaderboard' || path === 'news' ? { page: path as Page, symbol: '' } : { page: 'trade' as Page, symbol: path.toUpperCase() };
+		return PAGES.includes(path) ? { page: path as Page, symbol: '' } : { page: 'trade' as Page, symbol: path.toUpperCase() };
 	};
 	const [route, setRoute] = useState(read);
 	useEffect(() => {

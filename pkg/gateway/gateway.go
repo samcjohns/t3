@@ -38,6 +38,7 @@ type Market interface {
 type Ledger interface {
 	OpenAccount(ctx context.Context, id string) error
 	Deposit(ctx context.Context, accountID string, amount int64, reference string) error
+	Withdraw(ctx context.Context, accountID string, amount int64, reference string) error
 	DepositShares(ctx context.Context, accountID, symbol string, quantity int64, reference string) error
 	Reserve(ctx context.Context, o engine.Order) error
 	Release(ctx context.Context, orderID string) error
@@ -100,6 +101,7 @@ type Gateway struct {
 	log     *slog.Logger
 	mux     *http.ServeMux
 	board   leaderboard
+	alerts  newsAlerts
 }
 
 func New(market Market, ldg Ledger, reports Reports, cfg Config) *Gateway {
@@ -194,6 +196,7 @@ func (g *Gateway) routes() {
 	g.handle("GET /v1/leaderboard", public, g.getLeaderboard)
 	g.handle("GET /v1/news", public, g.getNews)
 	g.handle("POST /v1/news", maker, g.publishNews)
+	g.handle("POST /v1/news/alerts/claim", maker, g.claimNewsAlerts)
 
 	g.handle("GET /v1/market/symbols", public, g.listSymbols)
 	// Served outside handle: the hottest public read skips token lookup and
@@ -203,6 +206,8 @@ func (g *Gateway) routes() {
 	g.handle("GET /v1/market/{symbol}/trades", public, g.getTrades)
 	g.handle("GET /v1/market/{symbol}/candles", public, g.getCandles)
 
+	g.handle("GET /v1/admin/users", admin, g.listUsers)
+	g.handle("POST /v1/admin/news", admin, g.breakNews)
 	g.handle("POST /v1/admin/accounts/{id}/cash", admin, g.depositCash)
 	g.handle("POST /v1/admin/accounts/{id}/shares", admin, g.depositShares)
 }

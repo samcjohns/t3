@@ -406,6 +406,27 @@ func TestIdempotentDeposits(t *testing.T) {
 	}
 }
 
+func TestWithdraw(t *testing.T) {
+	m := newMarket(t)
+	m.fund("a", 1000, 0)
+	must(t, m.l.Reserve(ctx, buy("o1", "a", 4, 100)))
+	if err := m.l.Withdraw(ctx, "a", 601, ""); !errors.Is(err, ErrInsufficientFunds) {
+		t.Fatalf("withdrawing held cash: %v", err)
+	}
+	for _, bad := range []int64{0, -5} {
+		if err := m.l.Withdraw(ctx, "a", bad, ""); !errors.Is(err, ErrInvalidAmount) {
+			t.Fatalf("withdraw %d: %v", bad, err)
+		}
+	}
+	must(t, m.l.Withdraw(ctx, "a", 600, ""))
+	if a, _ := m.l.Account("a"); a.Cash != 400 || a.CashHeld != 400 {
+		t.Fatalf("account = %+v", a)
+	}
+	if err := m.l.Withdraw(ctx, "nobody", 1, ""); !errors.Is(err, ErrUnknownAccount) {
+		t.Fatalf("unknown account: %v", err)
+	}
+}
+
 func TestStoreFailureChangesNothing(t *testing.T) {
 	store := newMemStore()
 	l, err := Open(ctx, Config{Store: store})

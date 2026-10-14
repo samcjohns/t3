@@ -138,6 +138,22 @@ export interface Article {
 	target: number;
 }
 
+/** A trader as the admin page lists them. */
+export interface AdminUser {
+	id: string;
+	username: string;
+	/** Total cash, including cash_held. */
+	cash: number;
+	cash_held: number;
+	total_value: number;
+}
+
+/** The ledger's view of an account, as admin cash changes return it. */
+export interface Account {
+	cash: number;
+	cash_held: number;
+}
+
 export interface OrderRequest {
 	symbol: string;
 	direction: Direction;
@@ -255,5 +271,17 @@ export class Api {
 	}
 	placeOrder(order: OrderRequest) {
 		return this.request<Order>('POST', '/v1/orders', order);
+	}
+
+	async adminUsers() {
+		return (await this.request<{ users: AdminUser[] }>('GET', '/v1/admin/users')).users;
+	}
+	/** Adds cash to an account, or removes it when amount is negative. */
+	adjustCash(accountId: string, amount: number) {
+		return this.request<Account>('POST', `/v1/admin/accounts/${encodeURIComponent(accountId)}/cash`, { amount });
+	}
+	/** Publishes a story and has the news market maker move the price by `change` percent. */
+	breakNews(symbol: string, change: number, headline: string) {
+		return this.request<Article>('POST', '/v1/admin/news', { symbol, change, headline });
 	}
 }

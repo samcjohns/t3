@@ -138,7 +138,8 @@ func TestRestoreMatches(t *testing.T) {
 	must(t, err)
 	must(t, l.OpenAccount(ctx, "alice"))
 	must(t, l.OpenAccount(ctx, "bob"))
-	must(t, l.Deposit(ctx, "alice", 100_000, "starting-cash"))
+	must(t, l.Deposit(ctx, "alice", 100_100, "starting-cash"))
+	must(t, l.Withdraw(ctx, "alice", 100, ""))
 	must(t, l.DepositShares(ctx, "bob", "ACME", 30, ""))
 	buy := engine.Order{ID: "b1", AccountID: "alice", Symbol: "ACME", Direction: engine.Buy, Type: engine.Limit, Quantity: 20, LimitPrice: 1010}
 	sell := engine.Order{ID: "s1", AccountID: "bob", Symbol: "ACME", Direction: engine.Sell, Type: engine.Limit, Quantity: 30, LimitPrice: 1000}

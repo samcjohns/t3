@@ -103,6 +103,14 @@ func (c *HTTPClient) PublishNews(ctx context.Context, a Article) error {
 	return err
 }
 
+func (c *HTTPClient) ClaimNewsAlerts(ctx context.Context) ([]NewsAlert, error) {
+	var out struct {
+		Alerts []NewsAlert `json:"alerts"`
+	}
+	_, err := c.do(ctx, "POST", "/v1/news/alerts/claim", nil, &out, true)
+	return out.Alerts, err
+}
+
 func (c *HTTPClient) login(ctx context.Context) error {
 	var out struct {
 		Token string `json:"token"`

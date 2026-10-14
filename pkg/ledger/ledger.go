@@ -312,6 +312,31 @@ func (l *Ledger) Deposit(ctx context.Context, accountID string, amount int64, re
 	return t.commit(ctx)
 }
 
+// Withdraw debits cash from an account, e.g. an admin correction. Cash held
+// for open orders cannot be withdrawn. A non-empty reference makes it
+// idempotent, as for Deposit.
+func (l *Ledger) Withdraw(ctx context.Context, accountID string, amount int64, reference string) error {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	t := l.begin()
+	a, err := t.account(accountID)
+	if err != nil {
+		return err
+	}
+	if _, done := l.refs[refKey{accountID, reference}]; reference != "" && done {
+		return nil
+	}
+	if amount <= 0 {
+		return fmt.Errorf("%w: withdraw %d", ErrInvalidAmount, amount)
+	}
+	if avail := a.cash - a.cashHeld; amount > avail {
+		return fmt.Errorf("%w: need %d, have %d available", ErrInsufficientFunds, amount, avail)
+	}
+	a.cash -= amount
+	t.entry(Entry{AccountID: accountID, Kind: EntryWithdrawal, Reference: reference, CashDelta: -amount})
+	return t.commit(ctx)
+}
+
 // DepositShares credits shares to an account, e.g. to seed market makers. A
 // non-empty reference makes it idempotent, as for Deposit.
 func (l *Ledger) DepositShares(ctx context.Context, accountID, symbol string, quantity int64, reference string) error {

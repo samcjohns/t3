@@ -1395,3 +1395,37 @@ td:not(.up):not(.down) .sub {
 		gap: 12px 24px;
 	}
 }
+
+/* Admin */
+.admin {
+	display: flex;
+	flex-direction: column;
+	gap: 16px;
+}
+.admin-signin {
+	max-width: 380px;
+}
+.admin-form {
+	display: grid;
+	grid-template-columns: 1fr 1fr;
+	align-items: end;
+	gap: 14px;
+	margin-bottom: 12px;
+}
+.admin-form .wide {
+	grid-column: 1 / -1;
+}
+.admin-form .btn-row {
+	grid-column: 1 / -1;
+}
+.admin .notice {
+	margin-bottom: 12px;
+}
+tr.clickable.on td {
+	background: var(--panel-2);
+}
+@media (max-width: 760px) {
+	.admin-form {
+		grid-template-columns: 1fr;
+	}
+}

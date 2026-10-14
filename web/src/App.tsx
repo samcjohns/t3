@@ -2,6 +2,7 @@ import type { ComponentChildren } from 'preact';
 import { useCallback, useEffect, useMemo, useState } from 'preact/hooks';
 import type { Api, Candle, Fill, Interval, Portfolio, Trade } from './api';
 import { AccountMenu } from './components/AccountMenu';
+import { Admin } from './components/Admin';
 import { AuthPanel } from './components/AuthPanel';
 import { Chart } from './components/Chart';
 import { Leaderboard } from './components/Leaderboard';
@@ -92,6 +93,11 @@ export function App({ api }: { api: Api }) {
 					<a href="#/news" aria-current={route.page === 'news' ? 'page' : undefined}>
 						News
 					</a>
+					{session?.user.role === 'admin' && (
+						<a href="#/admin" aria-current={route.page === 'admin' ? 'page' : undefined}>
+							Admin
+						</a>
+					)}
 				</nav>
 				<div class="auction" title="Orders are matched in a batch auction at every tick.">
 					{offline ? (
@@ -128,7 +134,9 @@ export function App({ api }: { api: Api }) {
 				</section>
 			)}
 
-			{snapshot && route.page === 'news' ? (
+			{route.page === 'admin' ? (
+				<Admin api={api} session={session} onSession={setSession} snapshot={snapshot} />
+			) : snapshot && route.page === 'news' ? (
 				<News api={api} symbols={snapshot.prices.map((p) => p.symbol)} tick={snapshot.tick} onSelect={(s) => route.open('trade', s)} />
 			) : snapshot && route.page === 'leaderboard' ? (
 				<Leaderboard api={api} username={session?.user.username} tick={snapshot.tick} />
