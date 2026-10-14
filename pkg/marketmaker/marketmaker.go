@@ -10,6 +10,7 @@ package marketmaker
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"maps"
 	"math"
@@ -68,11 +69,30 @@ type Client interface {
 	Prices(ctx context.Context) (Snapshot, error)
 	Account(ctx context.Context) (Account, error)
 	PlaceOrder(ctx context.Context, o Order) error
+	PublishNews(ctx context.Context, a Article) error
 }
 
 // Strategy decides a tick's orders. It may keep state between calls.
 type Strategy interface {
 	Orders(snap Snapshot, acct Account) []Order
+}
+
+// Publisher is a strategy that also writes news. Run publishes its articles
+// after each call to Orders, before placing the orders.
+type Publisher interface {
+	// Articles returns the articles written since the last call.
+	Articles() []Article
+}
+
+// Article is a news story in the public API's shape.
+type Article struct {
+	Symbol   string `json:"symbol"`
+	Headline string `json:"headline"`
+	Body     string `json:"body,omitempty"`
+	// Price is the symbol's price when the story broke, and Target the
+	// price the story moves it towards.
+	Price  int64 `json:"price"`
+	Target int64 `json:"target"`
 }
 
 // Config tunes the run loop. Zero values select defaults.
@@ -125,7 +145,15 @@ func trade(ctx context.Context, c Client, s Strategy, snap Snapshot, log *slog.L
 		log.Warn("fetching account", "err", err)
 		return 0, 0
 	}
-	for _, o := range s.Orders(snap, acct) {
+	orders := s.Orders(snap, acct)
+	if p, ok := s.(Publisher); ok {
+		for _, a := range p.Articles() {
+			if err := c.PublishNews(ctx, a); err != nil {
+				log.Warn("publishing news", "symbol", a.Symbol, "err", err)
+			}
+		}
+	}
+	for _, o := range orders {
 		if err := c.PlaceOrder(ctx, o); err != nil {
 			rejected++
 			var api *APIError
@@ -414,6 +442,7 @@ func (m *Momentum) Orders(snap Snapshot, acct Account) []Order {
 // for a few ticks, giving the price a sudden jump the other makers then
 // absorb. News is more likely to push a price back towards its reference
 // than further away, and never sets a target beyond MaxDeviation from it.
+// Each headline is published as an Article.
 type News struct {
 	Reference map[string]int64
 	// Rate is the chance of news per symbol per tick. Default 1%.
@@ -432,9 +461,12 @@ type News struct {
 	// MaxDeviation is the furthest from its reference a target can be.
 	// Default 20%.
 	MaxDeviation float64
+	// Write turns a new story into an article. Default PlainHeadline.
+	Write func(symbol string, price, target int64) Article
 
-	rng     *rand.Rand
-	stories map[string]story
+	rng      *rand.Rand
+	stories  map[string]story
+	articles []Article
 }
 
 type story struct {
@@ -445,7 +477,7 @@ type story struct {
 func NewNews(tickers []Ticker, seed uint64) *News {
 	n := &News{Reference: map[string]int64{}, Rate: 0.01, MinImpact: 0.02, MaxImpact: 0.08,
 		MinTicks: 3, MaxTicks: 10, Aggression: 0.006, Notional: 2_000_000, MaxDeviation: 0.2,
-		rng: rand.New(rand.NewPCG(seed, 4)), stories: map[string]story{}}
+		Write: PlainHeadline, rng: rand.New(rand.NewPCG(seed, 4)), stories: map[string]story{}}
 	for _, t := range tickers {
 		n.Reference[t.Symbol] = t.ReferencePrice
 	}
@@ -466,6 +498,9 @@ func (n *News) Orders(snap Snapshot, acct Account) []Order {
 				continue
 			}
 			s = n.headline(p.Price, ref)
+			if s.target != p.Price {
+				n.articles = append(n.articles, n.Write(p.Symbol, p.Price, s.target))
+			}
 		}
 		if s.ticks--; s.ticks <= 0 || s.target == p.Price {
 			delete(n.stories, p.Symbol)
@@ -483,6 +518,23 @@ func (n *News) Orders(snap Snapshot, acct Account) []Order {
 		}
 	}
 	return out
+}
+
+func (n *News) Articles() []Article {
+	out := n.articles
+	n.articles = nil
+	return out
+}
+
+// PlainHeadline is a placeholder article that just states the move, such as
+// "ACME soars 5.2%".
+func PlainHeadline(symbol string, price, target int64) Article {
+	move := deviation(target, price)
+	verb := "soars"
+	if move < 0 {
+		verb = "falls"
+	}
+	return Article{Symbol: symbol, Headline: fmt.Sprintf("%s %s %.1f%%", symbol, verb, math.Abs(move)*100), Price: price, Target: target}
 }
 
 // headline draws a new story for a symbol. Good news is likelier the further

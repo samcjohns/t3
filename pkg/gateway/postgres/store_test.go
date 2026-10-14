@@ -117,3 +117,33 @@ func TestUserStore(t *testing.T) {
 		t.Fatal("session survived user deletion")
 	}
 }
+
+func TestNewsStore(t *testing.T) {
+	ctx := context.Background()
+	s, err := NewNewsStore(ctx, pgtest.New(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, err := s.Articles(ctx, "", 10); err != nil || len(got) != 0 {
+		t.Fatalf("empty Articles = %v %v", got, err)
+	}
+	at := time.Date(2026, 10, 14, 9, 0, 0, 123000, time.UTC)
+	articles := []gateway.Article{
+		{ID: "nws_1", Tick: 7, Time: at, Symbol: "ACME", Headline: "ACME soars 5.0%", Price: 1000, Target: 1050},
+		{ID: "nws_2", Tick: 8, Time: at.Add(time.Second), Symbol: "ZED", Headline: "ZED falls 3.0%", Body: "Details.", Price: 2000, Target: 1940},
+		{ID: "nws_3", Tick: 9, Time: at.Add(2 * time.Second), Symbol: "ACME", Headline: "ACME falls 2.0%", Price: 1040, Target: 1019},
+	}
+	for _, a := range articles {
+		if err := s.AddArticle(ctx, a); err != nil {
+			t.Fatal(err)
+		}
+	}
+	got, err := s.Articles(ctx, "", 2)
+	if err != nil || !reflect.DeepEqual(got, []gateway.Article{articles[2], articles[1]}) {
+		t.Fatalf("Articles = %+v %v", got, err)
+	}
+	got, err = s.Articles(ctx, "ACME", 10)
+	if err != nil || !reflect.DeepEqual(got, []gateway.Article{articles[2], articles[0]}) {
+		t.Fatalf("ACME Articles = %+v %v", got, err)
+	}
+}

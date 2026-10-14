@@ -124,6 +124,20 @@ export interface Leaderboard {
 	you: Standing | null;
 }
 
+/** A market news story. */
+export interface Article {
+	id: string;
+	tick: number;
+	time: string;
+	symbol: string;
+	headline: string;
+	body?: string;
+	/** The symbol's price when the story broke. */
+	price: number;
+	/** The price the story moves it towards. */
+	target: number;
+}
+
 export interface OrderRequest {
 	symbol: string;
 	direction: Direction;
@@ -233,6 +247,11 @@ export class Api {
 	}
 	leaderboard(limit = 100) {
 		return this.request<Leaderboard>('GET', `/v1/leaderboard?limit=${limit}`);
+	}
+	/** News, newest first, for one symbol or all of them. */
+	async news(symbol?: string, limit = 100) {
+		const q = symbol ? `&symbol=${encodeURIComponent(symbol)}` : '';
+		return (await this.request<{ articles: Article[] }>('GET', `/v1/news?limit=${limit}${q}`)).articles;
 	}
 	placeOrder(order: OrderRequest) {
 		return this.request<Order>('POST', '/v1/orders', order);

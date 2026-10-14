@@ -1224,6 +1224,72 @@ td:not(.up):not(.down) .sub {
 	font: 600 11px var(--sans);
 	vertical-align: 1px;
 }
+
+/* News */
+
+.news-filter {
+	flex-direction: row;
+	align-items: center;
+	gap: 8px;
+}
+.news-filter select {
+	width: auto;
+	min-width: 96px;
+}
+.news {
+	list-style: none;
+	margin: 0;
+	padding: 0;
+}
+.news li {
+	display: grid;
+	grid-template-columns: 96px minmax(0, 1fr) auto;
+	gap: 4px 16px;
+	align-items: baseline;
+	padding: 12px 4px;
+	border-top: 1px solid var(--line);
+}
+.news time {
+	color: var(--muted);
+	font: 12px var(--mono);
+	font-variant-numeric: tabular-nums;
+}
+.news h2 {
+	margin: 0;
+	font-size: 15px;
+	font-weight: 600;
+	overflow-wrap: anywhere;
+}
+.news-story > p {
+	margin: 4px 0 0;
+}
+.news-meta {
+	display: flex;
+	gap: 8px;
+	font: 12px var(--mono);
+}
+.news-move {
+	padding: 2px 8px;
+	border-radius: 6px;
+	background: var(--panel-2);
+	font: 600 13px var(--mono);
+	font-variant-numeric: tabular-nums;
+}
+.news-move.up {
+	background: var(--up-soft);
+}
+.news-move.down {
+	background: var(--down-soft);
+}
+
+@media (max-width: 760px) {
+	.news li {
+		grid-template-columns: minmax(0, 1fr) auto;
+	}
+	.news time {
+		grid-column: 1 / -1;
+	}
+}
 .standings tr.gap td {
 	padding: 2px 8px;
 	color: var(--muted);

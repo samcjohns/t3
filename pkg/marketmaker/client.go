@@ -98,6 +98,11 @@ func (c *HTTPClient) PlaceOrder(ctx context.Context, o Order) error {
 	return err
 }
 
+func (c *HTTPClient) PublishNews(ctx context.Context, a Article) error {
+	_, err := c.do(ctx, "POST", "/v1/news", a, nil, true)
+	return err
+}
+
 func (c *HTTPClient) login(ctx context.Context) error {
 	var out struct {
 		Token string `json:"token"`

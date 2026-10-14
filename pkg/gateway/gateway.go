@@ -81,7 +81,9 @@ type Config struct {
 	// with a Cloudflare tunnel connector.
 	TrustedProxies []netip.Prefix
 	// Users persists users and sessions. Defaults to an in-memory store.
-	Users  UserStore
+	Users UserStore
+	// News persists news articles. Defaults to an in-memory store.
+	News   NewsStore
 	Logger *slog.Logger
 	Clock  func() time.Time
 }
@@ -125,6 +127,9 @@ func New(market Market, ldg Ledger, reports Reports, cfg Config) *Gateway {
 	if cfg.Users == nil {
 		cfg.Users = NewMemoryUserStore()
 	}
+	if cfg.News == nil {
+		cfg.News = NewMemoryNewsStore()
+	}
 	g := &Gateway{
 		market:  market,
 		ledger:  ldg,
@@ -154,6 +159,8 @@ const (
 	// session needs a signed-in session: an API token can trade, but cannot
 	// change the credentials that control the account.
 	session
+	// maker is for internal market makers (and admins).
+	maker
 	admin
 )
 
@@ -185,6 +192,8 @@ func (g *Gateway) routes() {
 	g.handle("POST /v1/orders", trader, g.placeOrder)
 
 	g.handle("GET /v1/leaderboard", public, g.getLeaderboard)
+	g.handle("GET /v1/news", public, g.getNews)
+	g.handle("POST /v1/news", maker, g.publishNews)
 
 	g.handle("GET /v1/market/symbols", public, g.listSymbols)
 	// Served outside handle: the hottest public read skips token lookup and
@@ -300,6 +309,8 @@ func (g *Gateway) handle(pattern string, acc access, h handlerFunc) {
 			case user == nil:
 				rec.Header().Set("WWW-Authenticate", "Bearer")
 				return apiError{http.StatusUnauthorized, "unauthorized", "a valid bearer token is required"}
+			case acc == maker && user.Role != RoleMarketMaker && user.Role != RoleAdmin:
+				return apiError{http.StatusForbidden, "forbidden", "market maker role required"}
 			case acc == admin && user.Role != RoleAdmin:
 				return apiError{http.StatusForbidden, "forbidden", "admin role required"}
 			case acc == session && cred != viaSession:

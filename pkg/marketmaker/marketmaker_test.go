@@ -2,8 +2,10 @@ package marketmaker
 
 import (
 	"context"
+	"encoding/json"
 	"log/slog"
 	"math"
+	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
@@ -145,6 +147,73 @@ func TestNewsTargetsStayBounded(t *testing.T) {
 		for _, o := range n.Orders(Snapshot{Prices: []Price{{"ACME", 1000}}}, Account{}) {
 			t.Fatalf("order with no funds: %+v", o)
 		}
+	}
+}
+
+func TestPlainHeadline(t *testing.T) {
+	for _, c := range []struct {
+		price, target int64
+		want          string
+	}{
+		{1000, 1052, "ACME soars 5.2%"},
+		{1000, 969, "ACME falls 3.1%"},
+	} {
+		if a := PlainHeadline("ACME", c.price, c.target); a.Headline != c.want || a.Price != c.price || a.Target != c.target {
+			t.Errorf("PlainHeadline(%d, %d) = %+v, want %q", c.price, c.target, a, c.want)
+		}
+	}
+}
+
+// TestNewsPublishesHeadlines checks each new story is published once, over
+// HTTP, and shows up in the public news feed.
+func TestNewsPublishesHeadlines(t *testing.T) {
+	x := newExchange(t)
+	c := NewHTTPClient(x.url, "mm-news", "maker password")
+	listed, err := c.Tickers(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	n := NewNews(listed, 1)
+	n.Rate = 1
+	snap, err := c.Prices(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	trade(ctx, c, n, snap, slog.New(slog.DiscardHandler))
+	if len(n.Articles()) != 0 {
+		t.Fatal("articles left unpublished")
+	}
+
+	res, err := http.Get(x.url + "/v1/news")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer res.Body.Close()
+	var feed struct {
+		Articles []Article `json:"articles"`
+	}
+	if err := json.NewDecoder(res.Body).Decode(&feed); err != nil {
+		t.Fatal(err)
+	}
+	if len(feed.Articles) != len(n.stories) || len(feed.Articles) == 0 {
+		t.Fatalf("%d articles for %d stories", len(feed.Articles), len(n.stories))
+	}
+	for _, a := range feed.Articles {
+		s := n.stories[a.Symbol]
+		if a.Target != s.target || !strings.HasPrefix(a.Headline, a.Symbol+" ") {
+			t.Errorf("article %+v for story %+v", a, s)
+		}
+	}
+
+	// Stories already running are not news again.
+	trade(ctx, c, n, snap, slog.New(slog.DiscardHandler))
+	if res, err = http.Get(x.url + "/v1/news"); err != nil {
+		t.Fatal(err)
+	}
+	defer res.Body.Close()
+	before := len(feed.Articles)
+	if err := json.NewDecoder(res.Body).Decode(&feed); err != nil || len(feed.Articles) != before {
+		t.Fatalf("%d articles after a second tick of the same stories, want %d (%v)", len(feed.Articles), before, err)
 	}
 }
 
@@ -435,8 +504,9 @@ func (f *fakeClient) Prices(context.Context) (Snapshot, error) {
 	f.i++
 	return f.snaps[f.i-1], nil
 }
-func (f *fakeClient) Account(context.Context) (Account, error) { return Account{}, nil }
-func (f *fakeClient) PlaceOrder(context.Context, Order) error  { return nil }
+func (f *fakeClient) Account(context.Context) (Account, error)   { return Account{}, nil }
+func (f *fakeClient) PlaceOrder(context.Context, Order) error    { return nil }
+func (f *fakeClient) PublishNews(context.Context, Article) error { return nil }
 
 type countingStrategy struct{ calls int }
 

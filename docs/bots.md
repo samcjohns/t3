@@ -54,6 +54,7 @@ The endpoints a bot uses:
 | `GET /v1/account/history?interval=1m` | Your account value over time. |
 | `POST /v1/orders` | Place an order. |
 | `GET /v1/leaderboard` | Where you rank against everyone else. |
+| `GET /v1/news` | Market news, newest first. A story moves its symbol's price over the next few auctions. No token needed. |
 
 ## 3. Place orders
 

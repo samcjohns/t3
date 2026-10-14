@@ -184,6 +184,7 @@ func run() error {
 		AllowedOrigins: cfg.origins,
 		TrustedProxies: cfg.proxies,
 		Users:          stores.users,
+		News:           stores.news,
 		Logger:         log,
 	})
 
@@ -367,6 +368,7 @@ type stores struct {
 	engine *enginepg.Journal
 	ledger ledger.Store
 	users  gateway.UserStore
+	news   gateway.NewsStore
 }
 
 // openStores connects each service to its own database role. Without any
@@ -414,6 +416,9 @@ func openStores(ctx context.Context, cfg config, log *slog.Logger) (stores, func
 		return fail(err)
 	}
 	if s.users, err = gatewaypg.NewUserStore(ctx, p); err != nil {
+		return fail(err)
+	}
+	if s.news, err = gatewaypg.NewNewsStore(ctx, p); err != nil {
 		return fail(err)
 	}
 	return s, closeAll, nil

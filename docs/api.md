@@ -33,6 +33,8 @@ To trade from your own code, see [bots.md](bots.md).
 | `GET /v1/account/history?interval=&limit=` | trader | Your account's total value (cash plus holdings at last prices) as `open`/`high`/`low`/`close` candles, oldest first, with the same `interval` options as market candles. See below. |
 | `POST /v1/orders` | trader | Places an order, returning `202` with the accepted order. See below. |
 | `GET /v1/leaderboard?limit=` | — | Traders ranked by account value, highest first, as `{tick, starting_cash, traders, standings, you}`. Each standing has `rank`, `username`, `total_value` and `gain` (value less starting cash), and equal values share a rank. `you` is the caller's own standing when a trader token is sent, even outside the limit, and `null` otherwise. Admins and market makers are not ranked. Standings are computed once per tick, so a new trader appears after the next auction. |
+| `GET /v1/news?symbol=&limit=` | — | Market news, newest first, as `{articles}`. Each article has `id`, `tick`, `time`, `symbol`, `headline`, an optional `body`, the symbol's `price` when the story broke and the `target` price it moves towards. `symbol` filters to one symbol. |
+| `POST /v1/news` | market maker | `{symbol, headline, body?, price, target}`: publishes an article, returning `201` with it. The headline is 1–200 characters and the body at most 4,000. The `news` market maker calls this for each story it starts. Admins may also publish. |
 | `GET /v1/market/symbols` | — | The tradable symbols, each with `name` and `reference_price`. |
 | `GET /v1/market/prices` | — | Every symbol's current price, as one pre-built snapshot that changes once per tick. It supports `ETag`/`If-None-Match`, which returns `304` while unchanged. |
 | `GET /v1/market/{symbol}/quote` | — | Last clearing price. Returns `404` if the symbol hasn't traded yet. |
@@ -125,7 +127,7 @@ T3_ADMIN_PASSWORD=change-me go run ./cmd/server
 
 ## Web app
 
-`web/` is the browser client: a Preact single-page app, built by Vite and served by nginx in the `t3-web` container. Anyone can browse prices, charts and the tape. Signed-in traders also see their account value, positions and fills, and can place orders. The Portfolio page (`#/portfolio`) charts their account value over time, shows their allocation, and lists each holding with its return against its average cost. Anyone can view the Leaderboard page (`#/leaderboard`), which ranks traders by account value. It talks only to the public API above.
+`web/` is the browser client: a Preact single-page app, built by Vite and served by nginx in the `t3-web` container. Anyone can browse prices, charts and the tape. Signed-in traders also see their account value, positions and fills, and can place orders. The Portfolio page (`#/portfolio`) charts their account value over time, shows their allocation, and lists each holding with its return against its average cost. Anyone can view the Leaderboard page (`#/leaderboard`), which ranks traders by account value, and the News page (`#/news`), which lists market news and can filter it by symbol. It talks only to the public API above.
 
 The container reads `T3_API_URL` at startup and serves it to the app as `/config.json`, and also allows it in the page's Content Security Policy, so one image works for any deployment. Compose sets it from `T3_PUBLIC_API_URL`.
 
@@ -146,7 +148,7 @@ There is no endpoint to list or cancel open orders yet, so the order ticket defa
 - **`liquidity`** quotes a five-level ladder of IOC bids and asks around every price, from 0.15% to 2.5% away. Each side totals `T3_MM_DEPTH` cents (default $100,000), with about $15,000 within 0.3%, so a new player's whole $10,000 fills near the last price and larger orders fill at a worse price instead of not at all. Its fair value drifts back toward the reference price, and it skews quotes against its inventory, but it stays within 0.5% of the last price.
 - **`flow`** is a noise trader. Each tick it crosses the spread on about half the symbols, steered by a slowly wandering sentiment per symbol.
 - **`momentum`** follows trends. It compares a fast and a slow moving average of each price and trades up to $5,000 in the direction of the gap, so moves that start tend to run for a while. It stops chasing once a price is 10% from its reference.
-- **`news`** trades on imaginary headlines. About once every 100 ticks per symbol, a story sets a target 2–8% away, and it trades about $20,000 a tick towards it for 3–10 ticks. Stories are likelier to push a price back towards its reference, and never target more than 20% from it.
+- **`news`** trades on imaginary headlines. About once every 100 ticks per symbol, a story sets a target 2–8% away, and it trades about $20,000 a tick towards it for 3–10 ticks. Stories are likelier to push a price back towards its reference, and never target more than 20% from it. It publishes each story to `POST /v1/news` before trading on it. For now the headline only states the move, such as "ACME soars 5.2%"; `News.Write` is the hook for writing richer articles.
 
 `momentum` and `news` cross the spread by at most 0.4% and 0.6%, inside the 1% a player's order needs to fill in full, so a player's order at that price has priority over theirs in the auction.
 

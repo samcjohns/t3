@@ -6,6 +6,7 @@ import { AuthPanel } from './components/AuthPanel';
 import { Chart } from './components/Chart';
 import { Leaderboard } from './components/Leaderboard';
 import { Markets } from './components/Markets';
+import { News } from './components/News';
 import { Portfolio as PortfolioPage } from './components/Portfolio';
 import { Fills, Positions, Tape } from './components/Tables';
 import { Ticket } from './components/Ticket';
@@ -88,6 +89,9 @@ export function App({ api }: { api: Api }) {
 					<a href="#/leaderboard" aria-current={route.page === 'leaderboard' ? 'page' : undefined}>
 						Leaderboard
 					</a>
+					<a href="#/news" aria-current={route.page === 'news' ? 'page' : undefined}>
+						News
+					</a>
 				</nav>
 				<div class="auction" title="Orders are matched in a batch auction at every tick.">
 					{offline ? (
@@ -124,7 +128,9 @@ export function App({ api }: { api: Api }) {
 				</section>
 			)}
 
-			{snapshot && route.page === 'leaderboard' ? (
+			{snapshot && route.page === 'news' ? (
+				<News api={api} symbols={snapshot.prices.map((p) => p.symbol)} tick={snapshot.tick} onSelect={(s) => route.open('trade', s)} />
+			) : snapshot && route.page === 'leaderboard' ? (
 				<Leaderboard api={api} username={session?.user.username} tick={snapshot.tick} />
 			) : snapshot && onPortfolio ? (
 				session && portfolio ? (

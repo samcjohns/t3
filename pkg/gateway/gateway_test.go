@@ -682,3 +682,41 @@ func TestChangePassword(t *testing.T) {
 	e.expect(e.do("POST", "/v1/auth/login", "", map[string]string{"username": "alice", "password": "correct horse"}), http.StatusUnauthorized)
 	e.expect(e.do("POST", "/v1/auth/login", "", map[string]string{"username": "alice", "password": "battery staple"}), http.StatusOK)
 }
+
+func TestNews(t *testing.T) {
+	e := newEnv(t, nil)
+	if _, err := e.gw.CreateUser(context.Background(), "mm-news", "maker password", RoleMarketMaker); err != nil {
+		t.Fatal(err)
+	}
+	maker := e.expect(e.do("POST", "/v1/auth/login", "", map[string]string{"username": "mm-news", "password": "maker password"}), http.StatusOK).body["token"].(string)
+	trader, _ := e.trader("alice")
+
+	story := map[string]any{"symbol": "ACME", "headline": "ACME soars 5.0%", "price": 1000, "target": 1050}
+	e.expect(e.do("POST", "/v1/news", "", story), http.StatusUnauthorized)
+	e.expect(e.do("POST", "/v1/news", trader, story), http.StatusForbidden)
+	for _, bad := range []map[string]any{
+		{"symbol": "NOPE", "headline": "x", "price": 1000, "target": 1050},
+		{"symbol": "ACME", "headline": "  ", "price": 1000, "target": 1050},
+		{"symbol": "ACME", "headline": strings.Repeat("x", 201), "price": 1000, "target": 1050},
+		{"symbol": "ACME", "headline": "x", "price": 0, "target": 1050},
+	} {
+		e.expect(e.do("POST", "/v1/news", maker, bad), http.StatusBadRequest)
+	}
+
+	e.tick()
+	first := e.expect(e.do("POST", "/v1/news", maker, story), http.StatusCreated).body
+	if first["symbol"] != "ACME" || first["headline"] != "ACME soars 5.0%" || num(first["tick"]) != 1 || num(first["target"]) != 1050 {
+		t.Fatalf("published = %v", first)
+	}
+	e.expect(e.do("POST", "/v1/news", maker, map[string]any{"symbol": "ZED", "headline": "ZED falls 3.0%", "price": 2000, "target": 1940}), http.StatusCreated)
+
+	all := e.expect(e.do("GET", "/v1/news", "", nil), http.StatusOK).body["articles"].([]any)
+	if len(all) != 2 || all[0].(map[string]any)["symbol"] != "ZED" || all[1].(map[string]any)["id"] != first["id"] {
+		t.Fatalf("news = %v", all)
+	}
+	acme := e.expect(e.do("GET", "/v1/news?symbol=ACME&limit=5", "", nil), http.StatusOK).body["articles"].([]any)
+	if len(acme) != 1 || acme[0].(map[string]any)["symbol"] != "ACME" {
+		t.Fatalf("ACME news = %v", acme)
+	}
+	e.expect(e.do("GET", "/v1/news?symbol=NOPE", "", nil), http.StatusNotFound)
+}
