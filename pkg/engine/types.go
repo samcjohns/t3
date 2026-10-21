@@ -84,8 +84,9 @@ type BookResult struct {
 	ClearingPrice int64       `json:"clearing_price"`
 	Volume        int64       `json:"volume"`
 	Executions    []Execution `json:"executions"`
-	// ExpiredOrderIDs lists market orders whose unfilled remainder was
-	// cancelled at the end of this tick.
+	// ExpiredOrderIDs lists orders whose unfilled remainder was cancelled
+	// this tick: market and IOC orders at the end of their auction, and
+	// orders cancelled through Orchestrator.Cancel before it.
 	ExpiredOrderIDs []string `json:"expired_order_ids"`
 }
 

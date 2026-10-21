@@ -166,11 +166,15 @@ type orderRequest struct {
 	MaxCost    int64            `json:"max_cost"`
 	// TimeInForce is GTC (default) or IOC.
 	TimeInForce engine.TimeInForce `json:"time_in_force"`
+	// Leverage is a buy's leverage ratio, borrowing the rest of its cost
+	// from the lending pool. 0 or 1 borrows nothing.
+	Leverage int64 `json:"leverage"`
 }
 
 type orderResponse struct {
 	engine.Order
-	Status string `json:"status"`
+	Leverage int64  `json:"leverage"`
+	Status   string `json:"status"`
 }
 
 func (g *Gateway) placeOrder(w http.ResponseWriter, r *http.Request, u *User) error {
@@ -201,7 +205,8 @@ func (g *Gateway) placeOrder(w http.ResponseWriter, r *http.Request, u *User) er
 
 	// Funding is reserved before the engine sees the order, so a fill can
 	// never overdraw the account.
-	if err := g.ledger.Reserve(r.Context(), order); err != nil {
+	leverage := max(req.Leverage, 1)
+	if err := g.ledger.ReserveLeveraged(r.Context(), order, leverage); err != nil {
 		g.metrics.inc(`t3_gateway_orders_total{result="rejected"}`)
 		return err
 	}
@@ -217,8 +222,8 @@ func (g *Gateway) placeOrder(w http.ResponseWriter, r *http.Request, u *User) er
 	}
 	g.metrics.inc(`t3_gateway_orders_total{result="accepted"}`)
 	g.log.Info("order accepted", "order_id", accepted.ID, "user_id", u.ID, "symbol", accepted.Symbol,
-		"direction", accepted.Direction, "type", accepted.Type, "quantity", accepted.Quantity)
-	writeJSON(w, http.StatusAccepted, orderResponse{Order: accepted, Status: "accepted"})
+		"direction", accepted.Direction, "type", accepted.Type, "quantity", accepted.Quantity, "leverage", leverage)
+	writeJSON(w, http.StatusAccepted, orderResponse{Order: accepted, Leverage: leverage, Status: "accepted"})
 	return nil
 }
 

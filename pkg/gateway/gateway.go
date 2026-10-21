@@ -40,10 +40,15 @@ type Ledger interface {
 	Deposit(ctx context.Context, accountID string, amount int64, reference string) error
 	Withdraw(ctx context.Context, accountID string, amount int64, reference string) error
 	DepositShares(ctx context.Context, accountID, symbol string, quantity int64, reference string) error
-	Reserve(ctx context.Context, o engine.Order) error
+	ReserveLeveraged(ctx context.Context, o engine.Order, ratio int64) error
 	Release(ctx context.Context, orderID string) error
 	Account(id string) (ledger.Account, error)
 	LastTick() uint64
+	Lend(ctx context.Context, accountID string, amount int64) error
+	Redeem(ctx context.Context, accountID string, amount int64) (int64, error)
+	Repay(ctx context.Context, accountID string, amount int64) (int64, error)
+	Pool() ledger.PoolSummary
+	Bankruptcies() []ledger.Bankruptcy
 }
 
 // Reports is the reporting service port.
@@ -194,6 +199,11 @@ func (g *Gateway) routes() {
 	g.handle("POST /v1/orders", trader, g.placeOrder)
 
 	g.handle("GET /v1/leaderboard", public, g.getLeaderboard)
+	g.handle("GET /v1/leaderboard/bankruptcies", public, g.getBankruptcies)
+	g.handle("GET /v1/pool", public, g.getPool)
+	g.handle("POST /v1/pool/lend", trader, g.lend)
+	g.handle("POST /v1/pool/withdraw", trader, g.withdrawFromPool)
+	g.handle("POST /v1/pool/repay", trader, g.repay)
 	g.handle("GET /v1/news", public, g.getNews)
 	g.handle("POST /v1/news", maker, g.publishNews)
 	g.handle("POST /v1/news/alerts/claim", maker, g.claimNewsAlerts)
@@ -425,6 +435,11 @@ var errorMapping = []struct {
 	{ledger.ErrInsufficientShares, http.StatusUnprocessableEntity, "insufficient_shares"},
 	{ledger.ErrUnknownAccount, http.StatusNotFound, "unknown_account"},
 	{ledger.ErrInvalidAmount, http.StatusBadRequest, "invalid_amount"},
+	{ledger.ErrLeverage, http.StatusUnprocessableEntity, "leverage_not_allowed"},
+	{ledger.ErrPoolLiquidity, http.StatusUnprocessableEntity, "insufficient_pool"},
+	{ledger.ErrLoanLimit, http.StatusUnprocessableEntity, "loan_limit"},
+	{ledger.ErrAccountLiquidating, http.StatusConflict, "account_liquidating"},
+	{ledger.ErrAccountClosed, http.StatusForbidden, "account_closed"},
 	{reporting.ErrUnknownSymbol, http.StatusNotFound, "unknown_symbol"},
 	{reporting.ErrInvalidInterval, http.StatusBadRequest, "invalid_interval"},
 	{ErrUsernameTaken, http.StatusConflict, "username_taken"},

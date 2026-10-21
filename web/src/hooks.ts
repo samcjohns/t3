@@ -105,13 +105,13 @@ export function useSession(api: Api) {
 	return [session, setSession] as const;
 }
 
-export type Page = 'trade' | 'portfolio' | 'leaderboard' | 'news' | 'admin';
+export type Page = 'trade' | 'portfolio' | 'leaderboard' | 'news' | 'pool' | 'admin';
 
 /**
  * The page and symbol in the URL hash: #/ACME for a symbol's trading view,
- * #/portfolio, #/leaderboard, #/news or #/admin. All survive reloads and can be linked.
+ * #/portfolio, #/leaderboard, #/news, #/pool or #/admin. All survive reloads and can be linked.
  */
-const PAGES: string[] = ['portfolio', 'leaderboard', 'news', 'admin'];
+const PAGES: string[] = ['portfolio', 'leaderboard', 'news', 'pool', 'admin'];
 
 export function useRoute() {
 	const read = () => {

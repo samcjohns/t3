@@ -38,6 +38,16 @@ services:
       T3_MARKET_MAKER_PASSWORD: ${T3_MARKET_MAKER_PASSWORD:-maker-dev-password}
       T3_HEARTBEAT: ${T3_HEARTBEAT:-10s}
       T3_ARCHIVE_DIR: /var/lib/t3/archive
+      # Optional settings; see docs/api.md#running. Empty means the server's
+      # own default.
+      T3_ADMIN_USERNAME: ${T3_ADMIN_USERNAME:-}
+      T3_STARTING_CASH: ${T3_STARTING_CASH:-}
+      T3_LENDING_RATE_BPS: ${T3_LENDING_RATE_BPS:-}
+      T3_MAX_TRADE_LOAN_BPS: ${T3_MAX_TRADE_LOAN_BPS:-}
+      T3_MAX_TRADER_LOAN_BPS: ${T3_MAX_TRADER_LOAN_BPS:-}
+      T3_MARKET_MAKER_CASH: ${T3_MARKET_MAKER_CASH:-}
+      T3_COMPACT_AFTER: ${T3_COMPACT_AFTER:-}
+      T3_LOG_LEVEL: ${T3_LOG_LEVEL:-}
       # Browser origins that may call the API: the web app, plus any other
       # sites that use it.
       T3_ALLOWED_ORIGINS: ${T3_ALLOWED_ORIGINS:-http://localhost:${T3_WEB_PORT:-3000}}

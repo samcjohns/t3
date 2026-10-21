@@ -150,21 +150,23 @@ func TestNewsTargetsStayBounded(t *testing.T) {
 	}
 }
 
-// TestNewsAlert checks admin news drives the price to its target, even past
-// MaxDeviation, without writing an article of its own.
+// TestNewsAlert checks admin news becomes one market buy, capped by cash,
+// without writing an article of its own.
 func TestNewsAlert(t *testing.T) {
 	n := NewNews([]Ticker{{"ACME", 1000}}, 1)
 	n.Rate = 0
-	acct := Account{Cash: 1_000_000_000}
-	n.Alert([]NewsAlert{{"ACME", 1500}, {"NOPE", 10}})
-	for price := int64(1000); price < 1500; price += 5 {
-		orders := n.Orders(Snapshot{Prices: []Price{{"ACME", price}}}, acct)
-		if len(orders) != 1 || orders[0].Direction != "BUY" || orders[0].LimitPrice > 1500 {
-			t.Fatalf("at %d: orders %+v", price, orders)
-		}
+	n.Alert([]NewsAlert{{"ACME", 500}, {"NOPE", 10}})
+	orders := n.Orders(Snapshot{Prices: []Price{{"ACME", 1000}}}, Account{Cash: 1_000_000_000})
+	want := Order{Symbol: "ACME", Direction: "BUY", Type: "MARKET", Quantity: 500, MaxCost: 1_000_000}
+	if len(orders) != 1 || orders[0] != want {
+		t.Fatalf("orders %+v", orders)
 	}
-	if o := n.Orders(Snapshot{Prices: []Price{{"ACME", 1500}}}, acct); len(o) != 0 {
-		t.Fatalf("at target: orders %+v", o)
+	if o := n.Orders(Snapshot{Prices: []Price{{"ACME", 1000}}}, Account{Cash: 1_000_000_000}); len(o) != 0 {
+		t.Fatalf("alert traded twice: %+v", o)
+	}
+	n.Alert([]NewsAlert{{"ACME", 500}})
+	if o := n.Orders(Snapshot{Prices: []Price{{"ACME", 1000}}}, Account{Cash: 300_000}); len(o) != 1 || o[0].MaxCost != 300_000 {
+		t.Fatalf("short of cash: %+v", o)
 	}
 	if a := n.Articles(); len(a) != 0 {
 		t.Fatalf("articles %+v", a)

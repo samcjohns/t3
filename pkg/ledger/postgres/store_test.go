@@ -193,3 +193,75 @@ func TestAuditDetectsTampering(t *testing.T) {
 		t.Fatal("audit missed a tampered balance")
 	}
 }
+
+// TestLeverageSurvivesRestart borrows, accrues interest and goes bankrupt,
+// then checks a restored ledger matches and the audit balances.
+func TestLeverageSurvivesRestart(t *testing.T) {
+	pool := pgtest.New(t)
+	now := time.Date(2026, 10, 21, 12, 0, 0, 0, time.UTC)
+	s, err := NewStore(ctx, pool)
+	must(t, err)
+	cfg := ledger.Config{Store: s, Clock: func() time.Time { return now }, Leverage: ledger.Leverage{TicksPerDay: 10, MaxTradeLoan: 10_000, MaxTraderLoan: 10_000}}
+	l, err := ledger.Open(ctx, cfg)
+	must(t, err)
+	for id, cash := range map[string]int64{"lena": 100_000, "tom": 10_000, "bea": 100_000} {
+		must(t, l.OpenAccount(ctx, id))
+		must(t, l.Deposit(ctx, id, cash, ""))
+	}
+	must(t, l.OpenAccount(ctx, "sam"))
+	must(t, l.DepositShares(ctx, "sam", "ACME", 100, ""))
+	must(t, l.Lend(ctx, "lena", 100_000))
+
+	order := func(id, acct string, dir engine.Direction, qty, price int64) engine.Order {
+		return engine.Order{ID: id, AccountID: acct, Symbol: "ACME", Direction: dir, Type: engine.Limit, Quantity: qty, LimitPrice: price}
+	}
+	exec := func(buy, sell engine.Order, qty, price int64) engine.Execution {
+		return engine.Execution{Symbol: "ACME", BuyOrderID: buy.ID, SellOrderID: sell.ID, BuyAccountID: buy.AccountID, SellAccountID: sell.AccountID, Price: price, Quantity: qty}
+	}
+	tick := func(n uint64, price int64, execs ...engine.Execution) {
+		t.Helper()
+		var vol int64
+		for _, e := range execs {
+			vol += e.Quantity
+		}
+		must(t, l.ApplyTick(ctx, engine.TickResult{Tick: n, Books: []engine.BookResult{{Symbol: "ACME", ClearingPrice: price, Volume: vol, Executions: execs}}}))
+	}
+
+	b1, s1 := order("b1", "tom", engine.Buy, 50, 1000), order("s1", "sam", engine.Sell, 50, 1000)
+	must(t, l.ReserveLeveraged(ctx, b1, 5))
+	must(t, l.Reserve(ctx, s1))
+	tick(1, 1000, exec(b1, s1, 50, 1000))
+
+	b2, s2 := order("b2", "bea", engine.Buy, 10, 700), order("s2", "sam", engine.Sell, 10, 700)
+	must(t, l.Reserve(ctx, b2))
+	must(t, l.Reserve(ctx, s2))
+	tick(2, 700, exec(b2, s2, 10, 700)) // tom's equity goes negative
+	liq, err := l.Liquidations(ctx)
+	must(t, err)
+	if len(liq.Sell) != 1 {
+		t.Fatalf("liquidation = %+v", liq)
+	}
+	b3 := order("b3", "bea", engine.Buy, 50, 600)
+	must(t, l.Reserve(ctx, b3))
+	tick(3, 600, exec(b3, liq.Sell[0], 50, 600))
+	if a, _ := l.Account("tom"); a.Status != ledger.StatusBankrupt {
+		t.Fatalf("tom = %+v", a)
+	}
+
+	r, err := ledger.Open(ctx, cfg)
+	must(t, err)
+	for _, id := range []string{"lena", "tom", "sam", "bea"} {
+		want, _ := l.Account(id)
+		got, _ := r.Account(id)
+		if !reflect.DeepEqual(got, want) {
+			t.Errorf("restored %s = %+v, want %+v", id, got, want)
+		}
+	}
+	if !reflect.DeepEqual(r.Pool(), l.Pool()) {
+		t.Errorf("restored pool = %+v, want %+v", r.Pool(), l.Pool())
+	}
+	if got, want := r.Bankruptcies(), l.Bankruptcies(); !reflect.DeepEqual(got, want) {
+		t.Errorf("restored bankruptcies = %+v, want %+v", got, want)
+	}
+	must(t, s.Audit(ctx))
+}

@@ -743,21 +743,22 @@ func TestAdminNews(t *testing.T) {
 	trader, _ := e.trader("alice")
 	admin := e.admin()
 
-	story := map[string]any{"symbol": "ACME", "change": -12.5, "headline": "ACME recalls every anvil"}
+	story := map[string]any{"symbol": "ACME", "quantity": 250, "headline": "ACME recalls every anvil"}
 	e.expect(e.do("POST", "/v1/admin/news", trader, story), http.StatusForbidden)
 	e.expect(e.do("POST", "/v1/admin/news", maker, story), http.StatusForbidden)
 	for _, bad := range []map[string]any{
-		{"symbol": "NOPE", "change": 5, "headline": "x"},
-		{"symbol": "ACME", "change": 0, "headline": "x"},
-		{"symbol": "ACME", "change": 51, "headline": "x"},
-		{"symbol": "ACME", "change": 5, "headline": " "},
+		{"symbol": "NOPE", "quantity": 5, "headline": "x"},
+		{"symbol": "ACME", "quantity": 0, "headline": "x"},
+		{"symbol": "ACME", "quantity": -5, "headline": "x"},
+		{"symbol": "ACME", "quantity": 1_000_001, "headline": "x"},
+		{"symbol": "ACME", "quantity": 5, "headline": " "},
 	} {
 		e.expect(e.do("POST", "/v1/admin/news", admin, bad), http.StatusBadRequest)
 	}
 
-	// ACME has never traded, so the move is from its reference price.
+	// ACME has never traded, so the article has its reference price.
 	a := e.expect(e.do("POST", "/v1/admin/news", admin, story), http.StatusCreated).body
-	if num(a["price"]) != 1000 || num(a["target"]) != 875 || a["headline"] != "ACME recalls every anvil" {
+	if num(a["price"]) != 1000 || num(a["target"]) != 0 || a["headline"] != "ACME recalls every anvil" {
 		t.Fatalf("article = %v", a)
 	}
 	if news := e.expect(e.do("GET", "/v1/news", "", nil), http.StatusOK).body["articles"].([]any); len(news) != 1 {
@@ -766,10 +767,72 @@ func TestAdminNews(t *testing.T) {
 
 	e.expect(e.do("POST", "/v1/news/alerts/claim", trader, nil), http.StatusForbidden)
 	alerts := e.expect(e.do("POST", "/v1/news/alerts/claim", maker, nil), http.StatusOK).body["alerts"].([]any)
-	if len(alerts) != 1 || alerts[0].(map[string]any)["symbol"] != "ACME" || num(alerts[0].(map[string]any)["target"]) != 875 {
+	if len(alerts) != 1 || alerts[0].(map[string]any)["symbol"] != "ACME" || num(alerts[0].(map[string]any)["quantity"]) != 250 {
 		t.Fatalf("alerts = %v", alerts)
 	}
 	if again := e.expect(e.do("POST", "/v1/news/alerts/claim", maker, nil), http.StatusOK).body["alerts"].([]any); len(again) != 0 {
 		t.Fatalf("alerts claimed twice: %v", again)
+	}
+}
+
+func TestLendingPool(t *testing.T) {
+	e := newEnv(t, nil)
+	admin := e.admin()
+	lena, _ := e.trader("lena")
+	tom, _ := e.trader("tom")
+	bob, bobID := e.trader("bob")
+	e.expect(e.do("POST", "/v1/admin/accounts/"+bobID+"/shares", admin, map[string]any{"symbol": "ACME", "quantity": 100}), http.StatusOK)
+
+	e.expect(e.do("POST", "/v1/pool/lend", "", map[string]any{"amount": 1}), http.StatusUnauthorized)
+	r := e.expect(e.do("POST", "/v1/pool/lend", lena, map[string]any{"amount": 50_000}), http.StatusOK)
+	if pool, you := r.body["pool"].(map[string]any), r.body["you"].(map[string]any); num(pool["value"]) != 50_000 || num(you["pool_value"]) != 50_000 || num(you["cash_available"]) != 50_000 {
+		t.Fatalf("after lending = %v", r.body)
+	}
+
+	order := map[string]any{"symbol": "ACME", "direction": "BUY", "type": "LIMIT", "quantity": 5, "limit_price": 1000, "time_in_force": "IOC", "leverage": 4}
+	if r := e.do("POST", "/v1/orders", tom, order); r.errorCode() != "leverage_not_allowed" {
+		t.Fatalf("4x = %d %v", r.status, r.body)
+	}
+	// One order may borrow 5% of the pool: 2,500.
+	order["leverage"], order["quantity"] = 2, 6
+	if r := e.do("POST", "/v1/orders", tom, order); r.errorCode() != "loan_limit" {
+		t.Fatalf("over the trade limit = %d %v", r.status, r.body)
+	}
+	order["quantity"] = 5
+	if r := e.expect(e.do("POST", "/v1/orders", tom, order), http.StatusAccepted); num(r.body["leverage"]) != 2 {
+		t.Fatalf("order = %v", r.body)
+	}
+	e.expect(e.do("POST", "/v1/orders", bob, map[string]any{"symbol": "ACME", "direction": "SELL", "type": "LIMIT", "quantity": 5, "limit_price": 1000}), http.StatusAccepted)
+	e.tick()
+
+	p := e.expect(e.do("GET", "/v1/account/portfolio", tom, nil), http.StatusOK)
+	if owed := num(p.body["owed"]); owed <= 2_500 || num(p.body["total_value"]) != 102_500-owed || p.body["status"] != "active" {
+		t.Fatalf("tom's portfolio = %v", p.body)
+	}
+	if r := e.do("POST", "/v1/pool/withdraw", lena, map[string]any{"all": true}); r.errorCode() != "insufficient_pool" {
+		t.Fatalf("withdrawing lent cash = %d %v", r.status, r.body)
+	}
+	if r := e.do("POST", "/v1/pool/lend", tom, map[string]any{"amount": 1}); r.errorCode() != "leverage_not_allowed" {
+		t.Fatalf("borrower lending = %d %v", r.status, r.body)
+	}
+	e.expect(e.do("POST", "/v1/pool/withdraw", lena, map[string]any{"all": true, "amount": 5}), http.StatusBadRequest)
+
+	r = e.expect(e.do("POST", "/v1/pool/repay", tom, map[string]any{"amount": 1_000}), http.StatusOK)
+	you := r.body["you"].(map[string]any)
+	if owed := num(you["owed"]); owed <= 1_500 || owed > 1_510 || num(you["cash_available"]) != 96_500 {
+		t.Fatalf("after repaying = %v", you)
+	}
+	r = e.expect(e.do("POST", "/v1/pool/withdraw", lena, map[string]any{"amount": 10_000}), http.StatusOK)
+	if num(r.body["you"].(map[string]any)["cash_available"]) != 60_000 {
+		t.Fatalf("after withdrawing = %v", r.body)
+	}
+	pub := e.expect(e.do("GET", "/v1/pool", "", nil), http.StatusOK)
+	if pool := pub.body["pool"].(map[string]any); pub.body["you"] != nil || num(pool["borrowers"]) != 1 || num(pool["lender_rate_bps"]) <= 0 || len(pool["rates"].([]any)) != 3 ||
+		num(pool["max_trade_loan_bps"]) != 500 || num(pool["max_trader_loan"]) != num(pool["value"])/2 {
+		t.Fatalf("public pool = %v", pub.body)
+	}
+	b := e.expect(e.do("GET", "/v1/leaderboard/bankruptcies", "", nil), http.StatusOK)
+	if num(b.body["total"]) != 0 || len(b.body["bankruptcies"].([]any)) != 0 {
+		t.Fatalf("bankruptcies = %v", b.body)
 	}
 }

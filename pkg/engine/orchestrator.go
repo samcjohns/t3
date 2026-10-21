@@ -41,10 +41,12 @@ type Orchestrator struct {
 	clock     func() time.Time
 	journal   Journal
 
-	// mu guards the intake buffer and the set of live order IDs.
+	// mu guards the intake buffer, the set of live order IDs and the
+	// cancellations queued for the next tick.
 	mu      sync.Mutex
 	pending []Order
 	live    map[string]struct{}
+	cancels map[string]struct{}
 	seq     uint64
 
 	// tickMu serialises ticks and guards books.
@@ -70,6 +72,7 @@ func NewOrchestrator(matcher BatchMatcher, cfg Config) *Orchestrator {
 		clock:     cfg.Clock,
 		journal:   cfg.Journal,
 		live:      make(map[string]struct{}),
+		cancels:   make(map[string]struct{}),
 		books:     make(map[string][]Order),
 	}
 }
@@ -122,6 +125,18 @@ func (o *Orchestrator) Submit(ctx context.Context, order Order) (Order, error) {
 	return order, nil
 }
 
+// Cancel removes a pending or resting order at the next tick, which lists it
+// in its book's ExpiredOrderIDs. Unknown and finished orders are ignored.
+// Cancellations are not journaled: one the engine restarts before applying
+// is lost, so callers that rely on it must cancel again.
+func (o *Orchestrator) Cancel(id string) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	if _, ok := o.live[id]; ok {
+		o.cancels[id] = struct{}{}
+	}
+}
+
 // Run ticks every heartbeat until ctx is cancelled. A tick in progress always
 // finishes before Run returns.
 func (o *Orchestrator) Run(ctx context.Context) error {
@@ -150,12 +165,31 @@ func (o *Orchestrator) Tick(ctx context.Context) (TickResult, error) {
 
 	o.mu.Lock()
 	incoming := slices.Clone(o.pending)
+	cancels := maps.Clone(o.cancels)
 	o.mu.Unlock()
 
-	books := maps.Clone(o.books)
+	// Cancelled orders leave the book before matching, but their symbol still
+	// gets a BookResult to report them.
+	books := make(map[string][]Order, len(o.books))
+	cancelled := map[string][]Order{}
+	add := func(ord Order) {
+		if _, ok := cancels[ord.ID]; ok {
+			cancelled[ord.Symbol] = append(cancelled[ord.Symbol], ord)
+			if _, ok := books[ord.Symbol]; !ok {
+				books[ord.Symbol] = nil
+			}
+			return
+		}
+		books[ord.Symbol] = append(books[ord.Symbol], ord)
+	}
+	for _, sym := range slices.Sorted(maps.Keys(o.books)) {
+		for _, ord := range o.books[sym] {
+			add(ord)
+		}
+	}
 	isNew := make(map[string]bool, len(incoming))
 	for _, ord := range incoming {
-		books[ord.Symbol] = append(slices.Clone(books[ord.Symbol]), ord)
+		add(ord)
 		isNew[ord.ID] = true
 	}
 
@@ -165,7 +199,10 @@ func (o *Orchestrator) Tick(ctx context.Context) (TickResult, error) {
 
 	for _, sym := range slices.Sorted(maps.Keys(books)) {
 		batch := books[sym]
-		m := o.matcher.Match(batch)
+		var m MatchResult
+		if len(batch) > 0 {
+			m = o.matcher.Match(batch)
+		}
 		book := BookResult{
 			Symbol:          sym,
 			ClearingPrice:   m.ClearingPrice,
@@ -175,6 +212,11 @@ func (o *Orchestrator) Tick(ctx context.Context) (TickResult, error) {
 		}
 		if book.Executions == nil {
 			book.Executions = []Execution{}
+		}
+		for _, c := range cancelled[sym] {
+			book.ExpiredOrderIDs = append(book.ExpiredOrderIDs, c.ID)
+			updates = append(updates, OrderUpdate{c.ID, c.Quantity, StatusExpired})
+			done = append(done, c.ID)
 		}
 		for _, e := range m.Expired {
 			book.ExpiredOrderIDs = append(book.ExpiredOrderIDs, e.ID)
@@ -220,6 +262,10 @@ func (o *Orchestrator) Tick(ctx context.Context) (TickResult, error) {
 	o.pending = slices.Clone(o.pending[len(incoming):])
 	for _, id := range done {
 		delete(o.live, id)
+	}
+	// Cancellations of orders that had already finished are dropped too.
+	for id := range cancels {
+		delete(o.cancels, id)
 	}
 	o.mu.Unlock()
 

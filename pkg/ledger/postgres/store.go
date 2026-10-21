@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io/fs"
+	"math/big"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -41,19 +42,23 @@ func NewStore(ctx context.Context, pool *pgxpool.Pool) (*Store, error) {
 func (s *Store) Load(ctx context.Context) (ledger.State, error) {
 	var st ledger.State
 	err := pgx.BeginTxFunc(ctx, s.pool, pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly}, func(tx pgx.Tx) error {
-		if err := tx.QueryRow(ctx, `SELECT last_tick FROM ledger.state`).Scan(&st.LastTick); err != nil {
+		if err := tx.QueryRow(ctx, `SELECT last_tick, pool_cash, pool_reserved, pool_shares, pool_index, pool_scaled FROM ledger.state`).Scan(
+			&st.LastTick, &st.Pool.Cash, &st.Pool.Reserved, &st.Pool.Shares, &st.Pool.Index, &st.Pool.Scaled); err != nil {
 			return err
 		}
 
 		byID := map[string]int{}
-		rows, err := tx.Query(ctx, `SELECT id, cash, cash_held FROM ledger.accounts ORDER BY id`)
+		rows, err := tx.Query(ctx, `SELECT id, status, cash, cash_held, pool_shares, loans FROM ledger.accounts ORDER BY id`)
 		if err != nil {
 			return err
 		}
 		for rows.Next() {
 			a := ledger.Account{Holdings: []ledger.Holding{}}
-			if err := rows.Scan(&a.ID, &a.Cash, &a.CashHeld); err != nil {
+			if err := rows.Scan(&a.ID, &a.Status, &a.Cash, &a.CashHeld, &a.PoolShares, &a.Loans); err != nil {
 				return err
+			}
+			if len(a.Loans) == 0 {
+				a.Loans = nil
 			}
 			byID[a.ID] = len(st.Accounts)
 			st.Accounts = append(st.Accounts, a)
@@ -79,14 +84,14 @@ func (s *Store) Load(ctx context.Context) (ledger.State, error) {
 			return err
 		}
 
-		rows, err = tx.Query(ctx, `SELECT "order", remaining, cash, shares, created_at FROM ledger.holds`)
+		rows, err = tx.Query(ctx, `SELECT "order", remaining, cash, shares, leverage, loan, created_at FROM ledger.holds`)
 		if err != nil {
 			return err
 		}
 		for rows.Next() {
 			var raw []byte
 			var h ledger.HoldState
-			if err := rows.Scan(&raw, &h.Remaining, &h.Cash, &h.Shares, &h.CreatedAt); err != nil {
+			if err := rows.Scan(&raw, &h.Remaining, &h.Cash, &h.Shares, &h.Leverage, &h.Loan, &h.CreatedAt); err != nil {
 				return err
 			}
 			if err := json.Unmarshal(raw, &h.Order); err != nil {
@@ -96,6 +101,34 @@ func (s *Store) Load(ctx context.Context) (ledger.State, error) {
 		}
 		if err := rows.Err(); err != nil {
 			return err
+		}
+
+		rows, err = tx.Query(ctx, `SELECT symbol, price FROM ledger.marks`)
+		if err != nil {
+			return err
+		}
+		st.Marks = map[string]int64{}
+		for rows.Next() {
+			var sym string
+			var price int64
+			if err := rows.Scan(&sym, &price); err != nil {
+				return err
+			}
+			st.Marks[sym] = price
+		}
+		if err := rows.Err(); err != nil {
+			return err
+		}
+
+		rows, err = tx.Query(ctx, `SELECT account_id, tick, time, written_off FROM ledger.bankruptcies ORDER BY tick, account_id`)
+		if err != nil {
+			return err
+		}
+		if st.Bankruptcies, err = pgx.CollectRows(rows, pgx.RowToStructByPos[ledger.Bankruptcy]); err != nil {
+			return err
+		}
+		for i := range st.Bankruptcies {
+			st.Bankruptcies[i].Time = st.Bankruptcies[i].Time.UTC()
 		}
 
 		rows, err = tx.Query(ctx, `SELECT account_id, reference FROM ledger.entries WHERE reference IS NOT NULL`)
@@ -112,9 +145,14 @@ func (s *Store) Apply(ctx context.Context, ch ledger.Changes) error {
 	return pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
 		b := &pgx.Batch{}
 		for _, a := range ch.Accounts {
-			b.Queue(`INSERT INTO ledger.accounts (id, cash, cash_held) VALUES ($1, $2, $3)
-				ON CONFLICT (id) DO UPDATE SET cash = excluded.cash, cash_held = excluded.cash_held`,
-				a.ID, a.Cash, a.CashHeld)
+			loans := a.Loans
+			if loans == nil {
+				loans = map[int64]*big.Int{}
+			}
+			b.Queue(`INSERT INTO ledger.accounts (id, status, cash, cash_held, pool_shares, loans) VALUES ($1, $2, $3, $4, $5, $6)
+				ON CONFLICT (id) DO UPDATE SET status = excluded.status, cash = excluded.cash, cash_held = excluded.cash_held,
+					pool_shares = excluded.pool_shares, loans = excluded.loans`,
+				a.ID, a.Status, a.Cash, a.CashHeld, a.PoolShares, loans)
 			symbols := make([]string, len(a.Holdings))
 			for i, h := range a.Holdings {
 				symbols[i] = h.Symbol
@@ -129,10 +167,11 @@ func (s *Store) Apply(ctx context.Context, ch ledger.Changes) error {
 			if err != nil {
 				return err
 			}
-			b.Queue(`INSERT INTO ledger.holds (order_id, account_id, "order", remaining, cash, shares, created_at)
-				VALUES ($1, $2, $3, $4, $5, $6, $7)
-				ON CONFLICT (order_id) DO UPDATE SET remaining = excluded.remaining, cash = excluded.cash, shares = excluded.shares`,
-				h.Order.ID, h.Order.AccountID, order, h.Remaining, h.Cash, h.Shares, h.CreatedAt)
+			b.Queue(`INSERT INTO ledger.holds (order_id, account_id, "order", remaining, cash, shares, leverage, loan, created_at)
+				VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+				ON CONFLICT (order_id) DO UPDATE SET remaining = excluded.remaining, cash = excluded.cash, shares = excluded.shares,
+					loan = excluded.loan`,
+				h.Order.ID, h.Order.AccountID, order, h.Remaining, h.Cash, h.Shares, h.Leverage, h.Loan, h.CreatedAt)
 		}
 		if len(ch.DeleteHolds) > 0 {
 			b.Queue(`DELETE FROM ledger.holds WHERE order_id = ANY($1)`, ch.DeleteHolds)
@@ -142,6 +181,25 @@ func (s *Store) Apply(ctx context.Context, ch ledger.Changes) error {
 				VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
 				e.AccountID, e.Kind, nullIf(e.Tick, 0), nullIf(e.OrderID, ""), nullIf(e.Reference, ""),
 				e.CashDelta, nullIf(e.Symbol, ""), e.ShareDelta, e.CreatedAt)
+		}
+		if p := ch.Pool; p != nil {
+			index, scaled := p.Index, p.Scaled
+			if index == nil {
+				index = map[int64]*big.Int{}
+			}
+			if scaled == nil {
+				scaled = map[int64]*big.Int{}
+			}
+			b.Queue(`UPDATE ledger.state SET pool_cash = $1, pool_reserved = $2, pool_shares = $3, pool_index = $4, pool_scaled = $5`,
+				p.Cash, p.Reserved, p.Shares, index, scaled)
+		}
+		for sym, price := range ch.Marks {
+			b.Queue(`INSERT INTO ledger.marks (symbol, price) VALUES ($1, $2)
+				ON CONFLICT (symbol) DO UPDATE SET price = excluded.price`, sym, price)
+		}
+		for _, bk := range ch.Bankruptcies {
+			b.Queue(`INSERT INTO ledger.bankruptcies (account_id, tick, time, written_off) VALUES ($1, $2, $3, $4)`,
+				bk.AccountID, bk.Tick, bk.Time, bk.WrittenOff)
 		}
 		if b.Len() > 0 {
 			if err := tx.SendBatch(ctx, b).Close(); err != nil {
@@ -163,7 +221,8 @@ func (s *Store) Apply(ctx context.Context, ch ledger.Changes) error {
 }
 
 // Audit verifies that the append-only entries reproduce every account's cash
-// and share balances. It returns an error describing the first mismatch.
+// and share balances, and the lending pool's cash. It returns an error
+// describing the first mismatch.
 func (s *Store) Audit(ctx context.Context) error {
 	var id string
 	err := s.pool.QueryRow(ctx, `
@@ -190,6 +249,18 @@ func (s *Store) Audit(ctx context.Context) error {
 		return fmt.Errorf("account %q: %s shares do not match entries", id, sym)
 	} else if err != pgx.ErrNoRows {
 		return err
+	}
+	// Every movement of the pool's cash is the opposite of an account's.
+	var ok bool
+	err = s.pool.QueryRow(ctx, `
+		SELECT s.pool_cash = -coalesce((SELECT sum(cash_delta) FROM ledger.entries
+		                                WHERE kind IN ('borrow', 'repay', 'lend', 'redeem')), 0)
+		FROM ledger.state s`).Scan(&ok)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return fmt.Errorf("pool cash does not match entries")
 	}
 	return nil
 }

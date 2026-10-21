@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"math"
 	"math/rand/v2"
 	"reflect"
@@ -43,7 +44,13 @@ func (m *market) tick() {
 }
 
 func newMarket(t *testing.T) *market {
-	m := &market{t: t, l: New()}
+	return newMarketWith(t, Config{})
+}
+
+func newMarketWith(t *testing.T, cfg Config) *market {
+	l, err := Open(ctx, cfg)
+	must(t, err)
+	m := &market{t: t, l: l}
 	m.eng = engine.NewOrchestrator(engine.FBAMatcher{}, engine.Config{OnTick: func(tr engine.TickResult) {
 		if err := m.l.ApplyTick(ctx, tr); err != nil {
 			t.Errorf("ApplyTick: %v", err)
@@ -78,7 +85,7 @@ func (m *market) want(acct string, cash, cashHeld, shares, sharesHeld int64) {
 	m.t.Helper()
 	a, err := m.l.Account(acct)
 	must(m.t, err)
-	want := Account{ID: acct, Cash: cash, CashHeld: cashHeld, Holdings: []Holding{}}
+	want := Account{ID: acct, Status: StatusActive, Cash: cash, CashHeld: cashHeld, Holdings: []Holding{}}
 	if shares > 0 {
 		want.Holdings = []Holding{{Symbol: "ACME", Quantity: shares, Held: sharesHeld}}
 	}
@@ -338,21 +345,24 @@ func TestConservation(t *testing.T) {
 
 // memStore is an in-memory Store. failNext makes the next Apply fail.
 type memStore struct {
-	accounts map[string]Account
-	holds    map[string]HoldState
-	entries  []Entry
-	lastTick uint64
-	failNext bool
+	accounts     map[string]Account
+	holds        map[string]HoldState
+	entries      []Entry
+	lastTick     uint64
+	pool         PoolState
+	marks        map[string]int64
+	bankruptcies []Bankruptcy
+	failNext     bool
 }
 
 func newMemStore() *memStore {
-	return &memStore{accounts: map[string]Account{}, holds: map[string]HoldState{}}
+	return &memStore{accounts: map[string]Account{}, holds: map[string]HoldState{}, marks: map[string]int64{}}
 }
 
 var errInjected = errors.New("injected failure")
 
 func (s *memStore) Load(context.Context) (State, error) {
-	st := State{LastTick: s.lastTick}
+	st := State{LastTick: s.lastTick, Pool: s.pool, Marks: s.marks, Bankruptcies: s.bankruptcies}
 	for _, a := range s.accounts {
 		st.Accounts = append(st.Accounts, a)
 	}
@@ -385,6 +395,11 @@ func (s *memStore) Apply(_ context.Context, ch Changes) error {
 	if ch.LastTick != nil {
 		s.lastTick = *ch.LastTick
 	}
+	if ch.Pool != nil {
+		s.pool = *ch.Pool
+	}
+	maps.Copy(s.marks, ch.Marks)
+	s.bankruptcies = append(s.bankruptcies, ch.Bankruptcies...)
 	return nil
 }
 

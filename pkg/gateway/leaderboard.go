@@ -56,6 +56,9 @@ func (g *Gateway) standings(ctx context.Context) (tick uint64, _ []Standing, err
 		if err != nil {
 			return 0, nil, err
 		}
+		if p.Status == ledger.StatusBankrupt {
+			continue // ranked under bankruptcies instead
+		}
 		out = append(out, Standing{Username: u.Username, TotalValue: p.TotalValue, Gain: p.TotalValue - g.cfg.StartingCash, userID: u.ID})
 	}
 	slices.SortFunc(out, func(a, b Standing) int {

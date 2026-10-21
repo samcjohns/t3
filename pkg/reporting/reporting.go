@@ -99,7 +99,13 @@ type Portfolio struct {
 	CashHeld    int64      `json:"cash_held"`
 	Positions   []Position `json:"positions"`
 	MarketValue int64      `json:"market_value"`
-	TotalValue  int64      `json:"total_value"`
+	// PoolValue is the account's stake in the lending pool, and Owed what it
+	// owes the pool.
+	PoolValue int64 `json:"pool_value"`
+	Owed      int64 `json:"owed"`
+	// TotalValue is cash plus holdings and pool stake, less what is owed.
+	TotalValue int64         `json:"total_value"`
+	Status     ledger.Status `json:"status"`
 }
 
 // AccountReader is the read side of the ledger that portfolios need.
@@ -404,7 +410,8 @@ func (s *Service) Portfolio(accountID string) (Portfolio, error) {
 	s.mu.RUnlock()
 
 	basis := costBasis(holdingsBefore(acct, trades), trades)
-	p := Portfolio{AccountID: acct.ID, Cash: acct.Cash, CashHeld: acct.CashHeld, Positions: []Position{}}
+	p := Portfolio{AccountID: acct.ID, Cash: acct.Cash, CashHeld: acct.CashHeld, Positions: []Position{},
+		PoolValue: acct.PoolValue, Owed: acct.Owed, Status: acct.Status}
 	for _, h := range acct.Holdings {
 		last := quotes[h.Symbol].LastPrice
 		pos := Position{Symbol: h.Symbol, Quantity: h.Quantity, Held: h.Held, LastPrice: last, Value: last * h.Quantity}
@@ -414,7 +421,7 @@ func (s *Service) Portfolio(accountID string) (Portfolio, error) {
 		p.Positions = append(p.Positions, pos)
 		p.MarketValue += pos.Value
 	}
-	p.TotalValue = p.Cash + p.MarketValue
+	p.TotalValue = p.Cash + p.MarketValue + p.PoolValue - p.Owed
 	return p, nil
 }
 
@@ -483,7 +490,9 @@ func costBasis(start map[string]int64, trades []AccountTrade) map[string]*basisS
 // retained trades, and starts at the oldest of them. Values are sampled once
 // a minute, at each symbol's closing price for that minute, so High and Low
 // are within that resolution. Deposits are not trades, so they appear to have
-// been there from the start.
+// been there from the start, as do the account's current stake in the lending
+// pool and debt to it: borrowing and repaying move cash and debt together, so
+// only interest and pool earnings are misplaced.
 func (s *Service) AccountHistory(accountID string, interval time.Duration, limit int) ([]ValueCandle, error) {
 	if interval <= 0 || interval%CandleBase != 0 {
 		return nil, fmt.Errorf("%w: %v", ErrInvalidInterval, interval)
@@ -512,7 +521,7 @@ func (s *Service) AccountHistory(accountID string, interval time.Duration, limit
 	}
 
 	// Rewind the balances to the start of the window.
-	cash := acct.Cash
+	cash := acct.Cash + acct.PoolValue - acct.Owed
 	shares := make(map[string]int64)
 	for _, h := range acct.Holdings {
 		shares[h.Symbol] = h.Quantity

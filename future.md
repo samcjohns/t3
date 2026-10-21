@@ -2,17 +2,15 @@
 
 Features we want to add eventually. Nothing here is scheduled yet.
 
-## Leverage trading
+## Leverage trading: follow-ups
 
-Let traders borrow to take positions larger than their cash, so gains and losses are magnified.
+Leverage and the lending pool are built (see [docs/api.md](docs/api.md#leverage)). Still open:
 
-Open questions:
-
-- **Ledger:** `Reserve` currently refuses any order the account can't fully fund. Margin needs a borrowed balance per account and a maximum leverage ratio.
-- **Margin calls and liquidation:** decide what happens when an account's equity falls below its maintenance margin, for example a forced sell in the next auction.
-- **Interest:** decide whether borrowed money accrues interest each tick or each day.
-- **Short selling:** decide whether leverage also covers selling shares the account doesn't hold.
-- **Portfolio and leaderboard:** account value must subtract what is owed, so leverage can't inflate a ranking.
+- **New account after bankruptcy:** decide whether the player can start again with a fresh account, and whether that account is marked as a restart.
+- **Empty pool:** nobody can borrow until players lend, so leverage is unavailable at launch. Decide whether that is acceptable or whether early lenders get a bonus rate.
+- **Per-symbol leverage limits:** thinly traded symbols should get a lower maximum ratio, so one liquidation can't crash the price and set off others.
+- **Short selling:** the pool lends cash only. Shorting needs a separate pool that lends shares.
+- **Cancelling orders:** the engine can now cancel orders, but only liquidation uses it. Traders could cancel their own GTC orders the same way.
 
 ## Leaderboard: Biggest Winners and Biggest Losers
 

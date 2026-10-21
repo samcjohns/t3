@@ -94,11 +94,11 @@ type Alerted interface {
 	Alert(alerts []NewsAlert)
 }
 
-// NewsAlert is admin news: move Symbol's price to Target. Its article is
-// already published.
+// NewsAlert is admin news: market buy Quantity shares of Symbol. Its article
+// is already published.
 type NewsAlert struct {
-	Symbol string `json:"symbol"`
-	Target int64  `json:"target"`
+	Symbol   string `json:"symbol"`
+	Quantity int64  `json:"quantity"`
 }
 
 // Article is a news story in the public API's shape.
@@ -466,8 +466,8 @@ func (m *Momentum) Orders(snap Snapshot, acct Account) []Order {
 // for a few ticks, giving the price a sudden jump the other makers then
 // absorb. News is more likely to push a price back towards its reference
 // than further away, and never sets a target beyond MaxDeviation from it.
-// Each headline is published as an Article. Admin news (see Alert) runs
-// like a headline of its own, unbounded by MaxDeviation.
+// Each headline is published as an Article. Admin news (see Alert) is a
+// single market buy, unbounded by MaxDeviation.
 type News struct {
 	Reference map[string]int64
 	// Rate is the chance of news per symbol per tick. Default 1%.
@@ -512,8 +512,7 @@ func NewNews(tickers []Ticker, seed uint64) *News {
 
 func (n *News) Orders(snap Snapshot, acct Account) []Order {
 	b := available(acct)
-	n.startAlerts(snap)
-	var out []Order
+	out := n.alertOrders(snap, &b)
 	for _, p := range snap.Prices {
 		ref, ok := n.Reference[p.Symbol]
 		if !ok || p.Price <= 0 {
@@ -547,26 +546,30 @@ func (n *News) Orders(snap Snapshot, acct Account) []Order {
 	return out
 }
 
-// Alert queues admin news to trade on from the next call to Orders. Each
-// replaces any story already running for its symbol.
+// Alert queues admin news to trade on from the next call to Orders.
 func (n *News) Alert(alerts []NewsAlert) {
 	n.alerts = append(n.alerts, alerts...)
 }
 
-// startAlerts turns queued alerts into stories, running long enough to reach
-// the target at Aggression per tick with time to spare for resistance from
-// the other makers.
-func (n *News) startAlerts(snap Snapshot) {
+// alertOrders turns queued alerts into market buys. Each may spend up to
+// twice its quantity at the last price, so it fills in full unless the book
+// is very thin.
+func (n *News) alertOrders(snap Snapshot, b *book) []Order {
+	var out []Order
 	for _, a := range n.alerts {
 		i := slices.IndexFunc(snap.Prices, func(p Price) bool { return p.Symbol == a.Symbol })
-		if i < 0 || a.Target <= 0 || snap.Prices[i].Price <= 0 {
+		if i < 0 || a.Quantity <= 0 || snap.Prices[i].Price <= 0 {
 			continue
 		}
-		gap := math.Abs(deviation(a.Target, snap.Prices[i].Price))
-		ticks := n.MaxTicks + 2*int(math.Ceil(gap/n.Aggression))
-		n.stories[a.Symbol] = story{target: a.Target, ticks: ticks}
+		maxCost := min(b.cash, 2*a.Quantity*snap.Prices[i].Price)
+		if maxCost <= 0 {
+			continue
+		}
+		b.cash -= maxCost
+		out = append(out, Order{Symbol: a.Symbol, Direction: "BUY", Type: "MARKET", Quantity: a.Quantity, MaxCost: maxCost})
 	}
 	n.alerts = nil
+	return out
 }
 
 func (n *News) Articles() []Article {

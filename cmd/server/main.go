@@ -50,6 +50,12 @@ type config struct {
 	gatewayDB     string
 	compactAfter  time.Duration
 	archiveDir    string
+	// lendingRate is the lending pool's base borrowing rate, in basis
+	// points per day.
+	lendingRate int64
+	// maxTradeLoan and maxTraderLoan cap what one order may borrow and one
+	// trader may owe, in basis points of the pool's value.
+	maxTradeLoan, maxTraderLoan int64
 }
 
 func loadConfig() (config, error) {
@@ -74,6 +80,15 @@ func loadConfig() (config, error) {
 	}
 	if c.startingCash, err = strconv.ParseInt(env("T3_STARTING_CASH", "1000000"), 10, 64); err != nil || c.startingCash < 0 {
 		return c, fmt.Errorf("T3_STARTING_CASH must be a non-negative integer of cents")
+	}
+	if c.lendingRate, err = strconv.ParseInt(env("T3_LENDING_RATE_BPS", "500"), 10, 64); err != nil || c.lendingRate <= 0 {
+		return c, fmt.Errorf("T3_LENDING_RATE_BPS must be a positive integer of basis points per day")
+	}
+	if c.maxTradeLoan, err = strconv.ParseInt(env("T3_MAX_TRADE_LOAN_BPS", "500"), 10, 64); err != nil || c.maxTradeLoan <= 0 || c.maxTradeLoan > 10_000 {
+		return c, fmt.Errorf("T3_MAX_TRADE_LOAN_BPS must be 1-10000 basis points of the lending pool")
+	}
+	if c.maxTraderLoan, err = strconv.ParseInt(env("T3_MAX_TRADER_LOAN_BPS", "5000"), 10, 64); err != nil || c.maxTraderLoan <= 0 || c.maxTraderLoan > 10_000 {
+		return c, fmt.Errorf("T3_MAX_TRADER_LOAN_BPS must be 1-10000 basis points of the lending pool")
 	}
 	if err := c.logLevel.UnmarshalText([]byte(env("T3_LOG_LEVEL", "info"))); err != nil {
 		return c, fmt.Errorf("T3_LOG_LEVEL: %w", err)
@@ -143,7 +158,16 @@ func run() error {
 
 	// Recover in dependency order: the engine's journal is the record the
 	// ledger and reporting service rebuild from.
-	ldg, err := ledger.Open(ctx, ledger.Config{Store: stores.ledger})
+	prices := map[string]int64{}
+	for _, t := range cfg.tickers {
+		prices[t.Symbol] = t.ReferencePrice
+	}
+	ldg, err := ledger.Open(ctx, ledger.Config{Store: stores.ledger, Prices: prices, Leverage: ledger.Leverage{
+		DailyRate:     cfg.lendingRate,
+		MaxTradeLoan:  cfg.maxTradeLoan,
+		MaxTraderLoan: cfg.maxTraderLoan,
+		TicksPerDay:   max(1, int64(24*time.Hour/cfg.heartbeat)),
+	}})
 	if err != nil {
 		return err
 	}
@@ -160,6 +184,7 @@ func run() error {
 			}
 			log.Debug("tick", "tick", tr.Tick, "books", len(tr.Books), "volume", volume)
 			settle(log, ldg, eng, tr)
+			liquidate(log, ldg, eng)
 			reports.Ingest(tr)
 		},
 		OnTickError: func(err error) { log.Error("tick failed; retrying next heartbeat", "err", err) },
@@ -172,6 +197,7 @@ func run() error {
 			return fmt.Errorf("ledger catch-up: %w", err)
 		}
 		reconcile(ctx, log, ldg, eng)
+		liquidate(log, ldg, eng)
 		if err := reports.Replay(ctx, eng); err != nil {
 			return fmt.Errorf("reporting replay: %w", err)
 		}
@@ -314,6 +340,32 @@ func settle(log *slog.Logger, ldg *ledger.Ledger, eng *engine.Orchestrator, tr e
 		// Order entry halts once the lag exceeds the gateway's limit; the
 		// next tick retries via catch-up.
 		log.Error("ledger did not settle tick", "tick", tr.Tick, "ledger_tick", ldg.LastTick(), "err", err)
+	}
+}
+
+// liquidate carries out the ledger's next liquidation steps: it cancels the
+// liquidating accounts' open orders and submits market sells of their shares
+// for the next auction. Failed steps are retried after the next tick.
+func liquidate(log *slog.Logger, ldg *ledger.Ledger, eng *engine.Orchestrator) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	liq, err := ldg.Liquidations(ctx)
+	if err != nil {
+		log.Error("planning liquidations", "err", err)
+		return
+	}
+	for _, id := range liq.Cancel {
+		eng.Cancel(id)
+	}
+	for _, o := range liq.Sell {
+		if _, err := eng.Submit(ctx, o); err != nil {
+			log.Error("submitting liquidation", "order_id", o.ID, "err", err)
+			if err := ldg.Release(ctx, o.ID); err != nil {
+				log.Error("releasing liquidation hold", "order_id", o.ID, "err", err)
+			}
+			continue
+		}
+		log.Info("liquidating", "account_id", o.AccountID, "symbol", o.Symbol, "quantity", o.Quantity)
 	}
 }
 

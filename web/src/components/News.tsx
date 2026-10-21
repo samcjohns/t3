@@ -75,7 +75,7 @@ export function News({ api, symbols, tick, onSelect }: Props) {
 										<span class="muted">at {money(a.price)}</span>
 									</p>
 								</div>
-								<span class={`news-move ${trendClass(a.target - a.price)}`}>{percent(a.target - a.price, a.price)}</span>
+								{a.target > 0 && <span class={`news-move ${trendClass(a.target - a.price)}`}>{percent(a.target - a.price, a.price)}</span>}
 							</li>
 						))}
 					</ol>

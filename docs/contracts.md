@@ -87,6 +87,7 @@ The engine publishes one of these every heartbeat (10 s by default).
 - `books` has one entry for each symbol that had orders (new or resting) in the batch, sorted by symbol. It is `[]` when there are none.
 - `clearing_price` and `volume` are both `0` when the book did not cross.
 - `executions` and `expired_order_ids` are always arrays, never `null`.
+- `expired_order_ids` lists orders whose unfilled remainder was cancelled this tick: market and `IOC` orders at the end of their auction, and orders cancelled before it. Only the ledger cancels orders today, to liquidate an account; a cancelled order is removed before matching.
 
 ## Clearing rules (FBA)
 

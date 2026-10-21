@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'preact/hooks';
 import { type AdminUser, type Api, ApiError, type PriceSnapshot, type Session } from '../api';
-import { money, parseDollars, percent, trendClass } from '../format';
+import { money, parseDollars } from '../format';
 
 interface Props {
 	api: Api;
@@ -196,15 +196,14 @@ function CashPanel({ api, tick }: { api: Api; tick?: number }) {
 
 function NewsPanel({ api, snapshot }: { api: Api; snapshot: PriceSnapshot }) {
 	const [symbol, setSymbol] = useState(snapshot.prices[0]?.symbol ?? '');
-	const [change, setChange] = useState('');
+	const [quantity, setQuantity] = useState('');
 	const [headline, setHeadline] = useState('');
 	const [busy, setBusy] = useState(false);
 	const [result, setResult] = useState<{ ok: boolean; text: string } | null>(null);
 
 	const price = snapshot.prices.find((p) => p.symbol === symbol);
-	const pct = Number(change);
-	const valid = change.trim() !== '' && Number.isFinite(pct) && pct !== 0 && Math.abs(pct) <= 50;
-	const target = price && valid ? Math.max(1, Math.round(price.price * (1 + pct / 100))) : null;
+	const qty = Number(quantity);
+	const valid = Number.isInteger(qty) && qty > 0 && qty <= 1_000_000;
 
 	const submit = async (e: Event) => {
 		e.preventDefault();
@@ -212,9 +211,9 @@ function NewsPanel({ api, snapshot }: { api: Api; snapshot: PriceSnapshot }) {
 		setBusy(true);
 		setResult(null);
 		try {
-			const a = await api.breakNews(symbol, pct, headline);
-			setResult({ ok: true, text: `Published. The news market maker will move ${a.symbol} from ${money(a.price)} towards ${money(a.target)}.` });
-			setChange('');
+			const a = await api.breakNews(symbol, qty, headline);
+			setResult({ ok: true, text: `Published. The news market maker will market buy ${qty.toLocaleString()} ${a.symbol} in the next auction.` });
+			setQuantity('');
 			setHeadline('');
 		} catch (err) {
 			setResult({ ok: false, text: err instanceof ApiError ? err.message : 'Something went wrong. Try again.' });
@@ -228,7 +227,7 @@ function NewsPanel({ api, snapshot }: { api: Api; snapshot: PriceSnapshot }) {
 			<header class="board-head">
 				<div>
 					<h1 class="panel-title">Break news</h1>
-					<p class="board-sub">The headline goes on the News page, and the news market maker trades the price towards the target over the next auctions.</p>
+					<p class="board-sub">The headline goes on the News page, and the news market maker market buys the shares in the next auction.</p>
 				</div>
 			</header>
 			<form class="admin-form" onSubmit={submit}>
@@ -243,21 +242,18 @@ function NewsPanel({ api, snapshot }: { api: Api; snapshot: PriceSnapshot }) {
 					</select>
 				</label>
 				<label>
-					<span>Change (%)</span>
-					<input inputMode="decimal" placeholder="e.g. 8 or -12.5" value={change} onInput={(e) => setChange(e.currentTarget.value)} required />
+					<span>Shares to buy</span>
+					<input inputMode="numeric" placeholder="e.g. 5000" value={quantity} onInput={(e) => setQuantity(e.currentTarget.value)} required />
 				</label>
 				<label class="wide">
 					<span>Headline</span>
 					<input maxLength={200} placeholder={`${symbol} …`} value={headline} onInput={(e) => setHeadline(e.currentTarget.value)} required />
 				</label>
 				<p class="hint wide">
-					{price && target !== null ? (
-						<>
-							{symbol} {money(price.price)} → {money(target)}{' '}
-							<span class={trendClass(target - price.price)}>({percent(target - price.price, price.price)})</span>
-						</>
-					) : change ? (
-						'Enter a non-zero change from -50 to 50.'
+					{price && valid ? (
+						`${qty.toLocaleString()} ${symbol} ≈ ${money(qty * price.price)} at ${money(price.price)}`
+					) : quantity ? (
+						'Enter a whole number of shares from 1 to 1,000,000.'
 					) : (
 						' '
 					)}

@@ -2,7 +2,6 @@ package gateway
 
 import (
 	"errors"
-	"math"
 	"net/http"
 	"strings"
 	"sync"
@@ -41,11 +40,11 @@ func (g *Gateway) listUsers(w http.ResponseWriter, r *http.Request, _ *User) err
 	return nil
 }
 
-// NewsAlert asks the news market maker to move a symbol to Target, as if on
-// its own news.
+// NewsAlert asks the news market maker to market buy Quantity shares of
+// Symbol, as if on its own news.
 type NewsAlert struct {
-	Symbol string `json:"symbol"`
-	Target int64  `json:"target"`
+	Symbol   string `json:"symbol"`
+	Quantity int64  `json:"quantity"`
 }
 
 // newsAlerts queues admin news for the news market maker. The queue lives in
@@ -59,17 +58,17 @@ type newsAlerts struct {
 // maxNewsAlerts bounds the queue when no news maker is running.
 const maxNewsAlerts = 100
 
-// maxNewsMove is the largest admin news move, in percent either way.
-const maxNewsMove = 50
+// maxNewsQuantity is the largest admin news buy, in shares.
+const maxNewsQuantity = 1_000_000
 
 // breakNews publishes an admin-written article and has the news market maker
-// move the symbol's price by the given percentage.
+// market buy the given number of shares of the symbol.
 func (g *Gateway) breakNews(w http.ResponseWriter, r *http.Request, u *User) error {
 	var req struct {
-		Symbol   string  `json:"symbol"`
-		Change   float64 `json:"change"`
-		Headline string  `json:"headline"`
-		Body     string  `json:"body"`
+		Symbol   string `json:"symbol"`
+		Quantity int64  `json:"quantity"`
+		Headline string `json:"headline"`
+		Body     string `json:"body"`
 	}
 	if err := decodeJSON(w, r, &req); err != nil {
 		return err
@@ -78,18 +77,15 @@ func (g *Gateway) breakNews(w http.ResponseWriter, r *http.Request, u *User) err
 	switch {
 	case !g.symbols[req.Symbol]:
 		return badRequest("unknown symbol %q", req.Symbol)
-	case req.Change == 0 || math.Abs(req.Change) > maxNewsMove || math.IsNaN(req.Change):
-		return badRequest("change must be a non-zero percentage from -%d to %d", maxNewsMove, maxNewsMove)
+	case req.Quantity <= 0 || req.Quantity > maxNewsQuantity:
+		return badRequest("quantity must be 1-%d shares", maxNewsQuantity)
 	case headline == "" || utf8.RuneCountInString(headline) > maxHeadline:
 		return badRequest("headline must be 1-%d characters", maxHeadline)
 	case utf8.RuneCountInString(body) > maxBody:
 		return badRequest("body must be at most %d characters", maxBody)
 	}
-	price := g.price(req.Symbol)
-	target := max(1, int64(math.Round(float64(price)*(1+req.Change/100))))
-	if target == price {
-		return badRequest("change is too small to move a price of %d cents", price)
-	}
+	// Admin news has no target: how far the buy moves the price depends on
+	// the book.
 	a := Article{
 		ID:       newID("nws"),
 		Tick:     g.market.LastTick(),
@@ -97,26 +93,25 @@ func (g *Gateway) breakNews(w http.ResponseWriter, r *http.Request, u *User) err
 		Symbol:   req.Symbol,
 		Headline: headline,
 		Body:     body,
-		Price:    price,
-		Target:   target,
+		Price:    g.price(req.Symbol),
 	}
 	if err := g.cfg.News.AddArticle(r.Context(), a); err != nil {
 		return err
 	}
 	q := &g.alerts
 	q.mu.Lock()
-	q.queued = append(q.queued, NewsAlert{Symbol: a.Symbol, Target: a.Target})
+	q.queued = append(q.queued, NewsAlert{Symbol: a.Symbol, Quantity: req.Quantity})
 	if n := len(q.queued); n > maxNewsAlerts {
 		q.queued = q.queued[n-maxNewsAlerts:]
 	}
 	q.mu.Unlock()
-	g.log.Info("admin news", "admin_id", u.ID, "symbol", a.Symbol, "price", a.Price, "target", a.Target)
+	g.log.Info("admin news", "admin_id", u.ID, "symbol", a.Symbol, "price", a.Price, "quantity", req.Quantity)
 	writeJSON(w, http.StatusCreated, a)
 	return nil
 }
 
 // claimNewsAlerts hands the queued admin news to the caller, the news market
-// maker, which trades each symbol towards its target.
+// maker, which market buys each alert's quantity.
 func (g *Gateway) claimNewsAlerts(w http.ResponseWriter, _ *http.Request, _ *User) error {
 	q := &g.alerts
 	q.mu.Lock()

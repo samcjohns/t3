@@ -164,7 +164,7 @@ func TestPortfolio(t *testing.T) {
 			{Symbol: "ACME", Quantity: 10, LastPrice: 1200, Value: 12_000},
 			{Symbol: "NEW", Quantity: 4}, // never traded: unvalued
 		},
-		MarketValue: 12_000, TotalValue: 62_000,
+		MarketValue: 12_000, TotalValue: 62_000, Status: ledger.StatusActive,
 	}
 	if !reflect.DeepEqual(p, want) {
 		t.Fatalf("portfolio = %+v", p)

@@ -9,6 +9,9 @@
 //   - market buy: max_cost in cash
 //   - any sell:   quantity in shares
 //
+// A leveraged buy holds only its own share of that cash, and sets the rest
+// aside in the lending pool (see pool.go).
+//
 // Settlement releases unused cash as orders fill: a limit buy that clears
 // below its limit gets the difference back, and whatever is left of a market
 // buy's hold is released when the order fills or expires.
@@ -23,6 +26,7 @@ import (
 	"fmt"
 	"maps"
 	"math"
+	"math/big"
 	"slices"
 	"sync"
 	"time"
@@ -42,17 +46,32 @@ var (
 	ErrTickOutOfOrder     = errors.New("tick out of order")
 	// ErrInconsistentTick means a tick result does not agree with the holds
 	// the ledger placed. The tick is rejected without changing any state.
-	ErrInconsistentTick = errors.New("tick inconsistent with holds")
+	ErrInconsistentTick   = errors.New("tick inconsistent with holds")
+	ErrLeverage           = errors.New("leverage not allowed")
+	ErrPoolLiquidity      = errors.New("not enough cash in the lending pool")
+	ErrLoanLimit          = errors.New("loan over the lending pool's limit")
+	ErrAccountLiquidating = errors.New("account is being liquidated")
+	ErrAccountClosed      = errors.New("account is bankrupt and closed")
 )
 
 // Account is a snapshot of one account's balances.
 type Account struct {
-	ID string `json:"id"`
+	ID     string `json:"id"`
+	Status Status `json:"status"`
 	// Cash is the total cash balance in minor units, including CashHeld.
 	Cash     int64 `json:"cash"`
 	CashHeld int64 `json:"cash_held"`
 	// Holdings is sorted by symbol and omits symbols with no shares.
 	Holdings []Holding `json:"holdings"`
+	// PoolShares is the account's stake in the lending pool, and PoolValue
+	// what it is worth now.
+	PoolShares int64 `json:"pool_shares"`
+	PoolValue  int64 `json:"pool_value"`
+	// Owed is what the account owes the lending pool now, interest
+	// included. PoolValue and Owed are derived, and zero in Changes.
+	Owed int64 `json:"owed"`
+	// Loans is the account's scaled debt per leverage ratio.
+	Loans map[int64]*big.Int `json:"-"`
 }
 
 // Holding is an account's position in one symbol.
@@ -74,16 +93,27 @@ type OrderChecker interface {
 }
 
 type account struct {
+	status             Status
 	cash, cashHeld     int64
 	shares, sharesHeld map[string]int64
+	poolShares         int64
+	// loans is nil when the account owes nothing. Its values are never
+	// modified in place.
+	loans map[int64]*big.Int
+}
+
+func newAccount() *account {
+	return &account{status: StatusActive, shares: map[string]int64{}, sharesHeld: map[string]int64{}}
 }
 
 func (a *account) clone() *account {
-	return &account{a.cash, a.cashHeld, maps.Clone(a.shares), maps.Clone(a.sharesHeld)}
+	c := *a
+	c.shares, c.sharesHeld, c.loans = maps.Clone(a.shares), maps.Clone(a.sharesHeld), maps.Clone(a.loans)
+	return &c
 }
 
 func (a *account) snapshot(id string) Account {
-	out := Account{ID: id, Cash: a.cash, CashHeld: a.cashHeld, Holdings: []Holding{}}
+	out := Account{ID: id, Status: a.status, Cash: a.cash, CashHeld: a.cashHeld, Holdings: []Holding{}, PoolShares: a.poolShares, Loans: maps.Clone(a.loans)}
 	for _, sym := range slices.Sorted(maps.Keys(a.shares)) {
 		if a.shares[sym] > 0 {
 			out.Holdings = append(out.Holdings, Holding{Symbol: sym, Quantity: a.shares[sym], Held: a.sharesHeld[sym]})
@@ -99,11 +129,14 @@ type hold struct {
 	remaining int64
 	// cash and shares are what is still held for the order.
 	cash, shares int64
-	createdAt    time.Time
+	// leverage is a leveraged buy's ratio, and loan the pool cash still set
+	// aside for it. Both are 0 for an order that borrows nothing.
+	leverage, loan int64
+	createdAt      time.Time
 }
 
 func (h *hold) state() HoldState {
-	return HoldState{Order: h.order, Remaining: h.remaining, Cash: h.cash, Shares: h.shares, CreatedAt: h.createdAt}
+	return HoldState{Order: h.order, Remaining: h.remaining, Cash: h.cash, Shares: h.shares, Leverage: h.leverage, Loan: h.loan, CreatedAt: h.createdAt}
 }
 
 // Config configures a Ledger. Zero values select defaults.
@@ -112,6 +145,10 @@ type Config struct {
 	Store Store
 	// Clock timestamps holds and entries. Defaults to time.Now.
 	Clock func() time.Time
+	// Prices are each symbol's reference price, which values its holdings
+	// for margin checks until it first trades.
+	Prices   map[string]int64
+	Leverage Leverage
 }
 
 type refKey struct{ account, ref string }
@@ -120,12 +157,17 @@ type refKey struct{ account, ref string }
 type Ledger struct {
 	store Store
 	clock func() time.Time
+	lev   Leverage
 
 	mu       sync.Mutex
 	accounts map[string]*account
 	holds    map[string]*hold
 	refs     map[refKey]struct{}
 	lastTick uint64
+	pool     *pool
+	// marks are the prices that value holdings for margin checks.
+	marks        map[string]int64
+	bankruptcies []Bankruptcy
 }
 
 // New returns an empty in-memory ledger.
@@ -139,12 +181,19 @@ func Open(ctx context.Context, cfg Config) (*Ledger, error) {
 	if cfg.Clock == nil {
 		cfg.Clock = time.Now
 	}
+	cfg.Leverage.setDefaults()
 	l := &Ledger{
 		store:    cfg.Store,
 		clock:    cfg.Clock,
+		lev:      cfg.Leverage,
 		accounts: make(map[string]*account),
 		holds:    make(map[string]*hold),
 		refs:     make(map[refKey]struct{}),
+		pool:     newPool(PoolState{}),
+		marks:    maps.Clone(cfg.Prices),
+	}
+	if l.marks == nil {
+		l.marks = map[string]int64{}
 	}
 	if l.store == nil {
 		return l, nil
@@ -154,7 +203,14 @@ func Open(ctx context.Context, cfg Config) (*Ledger, error) {
 		return nil, fmt.Errorf("loading ledger: %w", err)
 	}
 	for _, a := range st.Accounts {
-		acc := &account{cash: a.Cash, cashHeld: a.CashHeld, shares: map[string]int64{}, sharesHeld: map[string]int64{}}
+		acc := newAccount()
+		acc.cash, acc.cashHeld, acc.poolShares, acc.loans = a.Cash, a.CashHeld, a.PoolShares, maps.Clone(a.Loans)
+		if a.Status != "" {
+			acc.status = a.Status
+		}
+		if len(acc.loans) == 0 {
+			acc.loans = nil
+		}
 		for _, h := range a.Holdings {
 			acc.shares[h.Symbol] = h.Quantity
 			if h.Held > 0 {
@@ -164,12 +220,15 @@ func Open(ctx context.Context, cfg Config) (*Ledger, error) {
 		l.accounts[a.ID] = acc
 	}
 	for _, h := range st.Holds {
-		l.holds[h.Order.ID] = &hold{order: h.Order, remaining: h.Remaining, cash: h.Cash, shares: h.Shares, createdAt: h.CreatedAt}
+		l.holds[h.Order.ID] = &hold{order: h.Order, remaining: h.Remaining, cash: h.Cash, shares: h.Shares, leverage: h.Leverage, loan: h.Loan, createdAt: h.CreatedAt}
 	}
 	for _, r := range st.References {
 		l.refs[refKey{r.AccountID, r.Reference}] = struct{}{}
 	}
 	l.lastTick = st.LastTick
+	l.pool = newPool(st.Pool)
+	maps.Copy(l.marks, st.Marks)
+	l.bankruptcies = st.Bankruptcies
 	return l, nil
 }
 
@@ -181,11 +240,15 @@ type txn struct {
 	holds    map[string]*hold // nil marks a deleted hold
 	entries  []Entry
 	lastTick *uint64
+	// pool is the staged pool, or nil if unchanged.
+	pool         *pool
+	marks        map[string]int64
+	bankruptcies []Bankruptcy
 }
 
 // begin must be called with l.mu held.
 func (l *Ledger) begin() *txn {
-	return &txn{l: l, accounts: map[string]*account{}, holds: map[string]*hold{}}
+	return &txn{l: l, accounts: map[string]*account{}, holds: map[string]*hold{}, marks: map[string]int64{}}
 }
 
 func (t *txn) account(id string) (*account, error) {
@@ -226,6 +289,9 @@ func (t *txn) release(orderID string) {
 	a, _ := t.account(h.order.AccountID)
 	sym := h.order.Symbol
 	a.cashHeld -= h.cash
+	if h.loan > 0 {
+		t.stagedPool().reserved -= h.loan
+	}
 	a.sharesHeld[sym] -= h.shares
 	if a.sharesHeld[sym] == 0 {
 		delete(a.sharesHeld, sym)
@@ -250,6 +316,14 @@ func (t *txn) commit(ctx context.Context) error {
 	}
 	ch.Entries = t.entries
 	ch.LastTick = t.lastTick
+	if t.pool != nil {
+		st := t.pool.state()
+		ch.Pool = &st
+	}
+	if len(t.marks) > 0 {
+		ch.Marks = t.marks
+	}
+	ch.Bankruptcies = t.bankruptcies
 
 	if t.l.store != nil {
 		if err := t.l.store.Apply(ctx, ch); err != nil {
@@ -274,6 +348,11 @@ func (t *txn) commit(ctx context.Context) error {
 	if t.lastTick != nil {
 		l.lastTick = *t.lastTick
 	}
+	if t.pool != nil {
+		l.pool = t.pool
+	}
+	maps.Copy(l.marks, t.marks)
+	l.bankruptcies = append(l.bankruptcies, t.bankruptcies...)
 	return nil
 }
 
@@ -287,7 +366,7 @@ func (l *Ledger) OpenAccount(ctx context.Context, id string) error {
 		return fmt.Errorf("%w: %q", ErrAccountExists, id)
 	}
 	t := l.begin()
-	t.accounts[id] = &account{shares: map[string]int64{}, sharesHeld: map[string]int64{}}
+	t.accounts[id] = newAccount()
 	return t.commit(ctx)
 }
 
@@ -362,44 +441,7 @@ func (l *Ledger) DepositShares(ctx context.Context, accountID, symbol string, qu
 // is submitted to the engine; if the engine then rejects the order, call
 // Release.
 func (l *Ledger) Reserve(ctx context.Context, order engine.Order) error {
-	if err := order.Validate(); err != nil {
-		return err
-	}
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	t := l.begin()
-	a, err := t.account(order.AccountID)
-	if err != nil {
-		return err
-	}
-	if _, ok := l.holds[order.ID]; ok {
-		return fmt.Errorf("%w: %q", ErrDuplicateHold, order.ID)
-	}
-
-	h := &hold{order: order, remaining: order.Quantity, createdAt: l.clock()}
-	switch {
-	case order.Direction == engine.Sell:
-		if avail := a.shares[order.Symbol] - a.sharesHeld[order.Symbol]; avail < order.Quantity {
-			return fmt.Errorf("%w: need %d %s, have %d available", ErrInsufficientShares, order.Quantity, order.Symbol, avail)
-		}
-		h.shares = order.Quantity
-		a.sharesHeld[order.Symbol] += h.shares
-	default:
-		cost := order.MaxCost
-		if order.Type == engine.Limit {
-			if order.LimitPrice > math.MaxInt64/order.Quantity {
-				return fmt.Errorf("%w: order cost overflows", ErrInvalidAmount)
-			}
-			cost = order.Quantity * order.LimitPrice
-		}
-		if avail := a.cash - a.cashHeld; avail < cost {
-			return fmt.Errorf("%w: need %d, have %d available", ErrInsufficientFunds, cost, avail)
-		}
-		h.cash = cost
-		a.cashHeld += h.cash
-	}
-	t.holds[order.ID] = h
-	return t.commit(ctx)
+	return l.ReserveLeveraged(ctx, order, 1)
 }
 
 // Release removes an order's hold and frees whatever it still reserves.
@@ -442,9 +484,25 @@ func (l *Ledger) ApplyTick(ctx context.Context, tr engine.TickResult) error {
 			if bh.order.Type == engine.Limit {
 				debit = e.Quantity * bh.order.LimitPrice
 			}
-			bh.cash -= debit
+			// A leveraged buy borrows its ratio's share of the cost, from
+			// the pool cash set aside for it.
+			own, loan := bh.split(debit)
+			var borrowed int64
+			if loan > 0 {
+				borrowed = min(loan, scale(cost, bh.leverage-1, bh.leverage, false))
+				if cost-borrowed > own {
+					borrowed = cost - own
+				}
+				t.stagedPool().reserved -= loan
+			}
+			bh.cash -= own
+			bh.loan -= loan
 			bh.remaining -= e.Quantity
-			buyer.cashHeld -= debit
+			buyer.cashHeld -= own
+			if borrowed > 0 {
+				t.borrow(buyer, bh.leverage, borrowed)
+				t.entry(Entry{AccountID: bh.order.AccountID, Kind: EntryBorrow, Tick: tr.Tick, OrderID: bh.order.ID, CashDelta: borrowed})
+			}
 			buyer.cash -= cost
 			buyer.shares[e.Symbol] += e.Quantity
 			t.entry(Entry{AccountID: bh.order.AccountID, Kind: EntryBuy, Tick: tr.Tick, OrderID: bh.order.ID,
@@ -459,6 +517,10 @@ func (l *Ledger) ApplyTick(ctx context.Context, tr engine.TickResult) error {
 			seller.cash += cost
 			t.entry(Entry{AccountID: sh.order.AccountID, Kind: EntrySell, Tick: tr.Tick, OrderID: sh.order.ID,
 				CashDelta: cost, Symbol: e.Symbol, ShareDelta: -e.Quantity})
+			// Sale proceeds repay what the seller owes first.
+			if paid := t.repay(seller, cost); paid > 0 {
+				t.entry(Entry{AccountID: sh.order.AccountID, Kind: EntryRepay, Tick: tr.Tick, OrderID: sh.order.ID, CashDelta: -paid})
+			}
 
 			for _, h := range []*hold{bh, sh} {
 				if h.remaining == 0 {
@@ -469,7 +531,12 @@ func (l *Ledger) ApplyTick(ctx context.Context, tr engine.TickResult) error {
 		for _, id := range book.ExpiredOrderIDs {
 			t.release(id)
 		}
+		if book.Volume > 0 && t.mark(book.Symbol) != book.ClearingPrice {
+			t.marks[book.Symbol] = book.ClearingPrice
+		}
 	}
+	t.accrue()
+	t.enforceMargins(tr.Tick)
 	t.lastTick = &tr.Tick
 	return t.commit(ctx)
 }
@@ -523,7 +590,7 @@ func (l *Ledger) checkTick(tr engine.TickResult) error {
 					return bad("order %q overfilled", h.order.ID)
 				}
 			}
-			if bh.order.Type == engine.Market && spent[bh.order.ID] > bh.cash {
+			if bh.order.Type == engine.Market && spent[bh.order.ID] > bh.cash+bh.loan {
 				return bad("order %q exceeded max_cost", bh.order.ID)
 			}
 		}
@@ -611,7 +678,10 @@ func (l *Ledger) Account(id string) (Account, error) {
 	if !ok {
 		return Account{}, fmt.Errorf("%w: %q", ErrUnknownAccount, id)
 	}
-	return a.snapshot(id), nil
+	out := a.snapshot(id)
+	out.PoolValue = l.pool.stake(a.poolShares)
+	out.Owed = l.pool.owed(a.loans)
+	return out, nil
 }
 
 // LastTick returns the most recent tick applied.

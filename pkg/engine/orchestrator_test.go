@@ -111,6 +111,44 @@ func TestMarketRemainderExpires(t *testing.T) {
 	}
 }
 
+func TestCancel(t *testing.T) {
+	j := newMemJournal()
+	o, err := OpenOrchestrator(ctx, FBAMatcher{}, Config{Journal: j})
+	if err != nil {
+		t.Fatal(err)
+	}
+	o.Submit(ctx, order("rest", Buy, 5, 900))
+	mustTick(t, o)
+	o.Submit(ctx, order("new", Buy, 5, 950))
+	o.Submit(ctx, order("s1", Sell, 5, 900))
+	o.Cancel("rest")
+	o.Cancel("new")
+	o.Cancel("ghost")
+
+	b := mustTick(t, o).Books[0]
+	if b.Volume != 0 || !slices.Equal(b.ExpiredOrderIDs, []string{"rest", "new"}) {
+		t.Fatalf("book = %+v, want nothing traded and both cancelled", b)
+	}
+	if j.status["rest"] != (OrderUpdate{"rest", 5, StatusExpired}) || j.status["new"] != (OrderUpdate{"new", 5, StatusExpired}) {
+		t.Fatalf("statuses = %v", j.status)
+	}
+	// Cancelling the last order in a book still reports it.
+	o.Cancel("s1")
+	if b := mustTick(t, o).Books; len(b) != 1 || !slices.Equal(b[0].ExpiredOrderIDs, []string{"s1"}) {
+		t.Fatalf("books = %+v", b)
+	}
+	if r := mustTick(t, o); len(r.Books) != 0 {
+		t.Fatalf("cancelled orders should not rest: %+v", r.Books)
+	}
+	// Cancelled IDs are free again.
+	if _, err := o.Submit(ctx, order("ghost", Buy, 1, 1)); err != nil {
+		t.Fatal(err)
+	}
+	if b := mustTick(t, o).Books[0]; len(b.ExpiredOrderIDs) != 0 {
+		t.Fatalf("a cancel queued before submission applied: %+v", b)
+	}
+}
+
 func TestSymbolsClearIndependentlyInOrder(t *testing.T) {
 	o := NewOrchestrator(FBAMatcher{}, Config{})
 	for _, sym := range []string{"ZED", "ACME", "MID"} {

@@ -14,6 +14,11 @@ export const percent = (change: number, base: number) => (base ? pct.format(chan
 
 const portion = new Intl.NumberFormat('en-US', { style: 'percent', minimumFractionDigits: 1, maximumFractionDigits: 1 });
 
+const ratePct = new Intl.NumberFormat('en-US', { style: 'percent', minimumFractionDigits: 2, maximumFractionDigits: 2 });
+
+/** Basis points as a percentage, e.g. 500 → "5.00%". */
+export const bps = (n: number) => ratePct.format(n / 10_000);
+
 /** A part of a whole, unsigned, e.g. "12.5%". */
 export const share = (part: number, whole: number) => (whole ? portion.format(part / whole) : '—');
 

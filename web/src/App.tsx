@@ -8,6 +8,7 @@ import { Chart } from './components/Chart';
 import { Leaderboard } from './components/Leaderboard';
 import { Markets } from './components/Markets';
 import { News } from './components/News';
+import { Pool } from './components/Pool';
 import { Portfolio as PortfolioPage } from './components/Portfolio';
 import { Fills, Positions, Tape } from './components/Tables';
 import { Ticket } from './components/Ticket';
@@ -93,6 +94,9 @@ export function App({ api }: { api: Api }) {
 					<a href="#/news" aria-current={route.page === 'news' ? 'page' : undefined}>
 						News
 					</a>
+					<a href="#/pool" aria-current={route.page === 'pool' ? 'page' : undefined}>
+						Pool
+					</a>
 					{session?.user.role === 'admin' && (
 						<a href="#/admin" aria-current={route.page === 'admin' ? 'page' : undefined}>
 							Admin
@@ -131,11 +135,15 @@ export function App({ api }: { api: Api }) {
 					<Stat label="Cash available" value={money(portfolio.cash - portfolio.cash_held)} />
 					<Stat label="In open orders" value={money(portfolio.cash_held)} />
 					<Stat label="Holdings" value={money(portfolio.market_value)} />
+					{portfolio.owed > 0 && <Stat label="Borrowed" value={money(portfolio.owed)} />}
+					{portfolio.pool_value > 0 && <Stat label="Lent to pool" value={money(portfolio.pool_value)} />}
 				</section>
 			)}
 
 			{route.page === 'admin' ? (
 				<Admin api={api} session={session} onSession={setSession} snapshot={snapshot} />
+			) : snapshot && route.page === 'pool' ? (
+				<Pool api={api} session={session} onSession={setSession} tick={snapshot.tick} onChange={refreshAccount} />
 			) : snapshot && route.page === 'news' ? (
 				<News api={api} symbols={snapshot.prices.map((p) => p.symbol)} tick={snapshot.tick} onSelect={(s) => route.open('trade', s)} />
 			) : snapshot && route.page === 'leaderboard' ? (

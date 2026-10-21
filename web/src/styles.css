@@ -1171,6 +1171,9 @@ td:not(.up):not(.down) .sub {
 	flex-wrap: wrap;
 	margin-bottom: 12px;
 }
+.board-tabs {
+	margin-bottom: 12px;
+}
 .board-sub {
 	margin-top: 6px;
 	color: var(--muted);
@@ -1428,4 +1431,49 @@ tr.clickable.on td {
 	.admin-form {
 		grid-template-columns: 1fr;
 	}
+}
+
+/* Pool */
+.pool-page {
+	display: flex;
+	flex-direction: column;
+	gap: 16px;
+}
+.stat-label {
+	color: var(--muted);
+	font-size: 12px;
+	font-weight: 400;
+}
+.pool-explain {
+	margin: 12px 0 24px;
+}
+.pool-rates-title {
+	margin-bottom: 8px;
+}
+.pool-page table + .hint,
+.pool-page .table-scroll + .hint {
+	margin-top: 12px;
+}
+.pool-page .notice {
+	margin-bottom: 12px;
+}
+.pool-signin {
+	display: flex;
+	flex-direction: column;
+	align-items: center;
+	gap: 12px;
+}
+.pool-signin .auth {
+	width: min(360px, 100%);
+}
+.with-max .affix {
+	flex: 1;
+}
+.ticket .leverage small {
+	display: block;
+	margin-top: 6px;
+}
+
+.folio-value > .notice {
+	margin-top: 12px;
 }

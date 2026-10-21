@@ -93,6 +93,9 @@ export interface ValueCandle {
 	close: number;
 }
 
+/** An account's standing with the lending pool. A liquidating account can't trade while its shares are sold; a bankrupt one is closed. */
+export type AccountStatus = 'active' | 'liquidating' | 'bankrupt';
+
 export interface Portfolio {
 	account_id: string;
 	/** Total cash, including cash_held. */
@@ -101,7 +104,13 @@ export interface Portfolio {
 	cash_held: number;
 	positions: Position[];
 	market_value: number;
+	/** The account's stake in the lending pool. */
+	pool_value: number;
+	/** What the account owes the lending pool, interest included. */
+	owed: number;
+	/** Cash plus holdings plus pool stake, less what is owed. */
 	total_value: number;
+	status: AccountStatus;
 }
 
 export interface Standing {
@@ -124,6 +133,63 @@ export interface Leaderboard {
 	you: Standing | null;
 }
 
+/** A trader closed by liquidation, with debt they couldn't repay. */
+export interface Bankruptcy {
+	username: string;
+	tick: number;
+	time: string;
+	/** The debt left unpaid, which the pool's lenders lost. */
+	written_off: number;
+}
+
+/** What borrowing at one leverage ratio costs, in basis points per day. */
+export interface RatioRate {
+	ratio: number;
+	rate_bps: number;
+}
+
+/** The lending pool. Rates are in basis points per day. */
+export interface PoolSummary {
+	/** Cash plus lent. */
+	value: number;
+	/** Cash not lent out. */
+	cash: number;
+	/** Cash not lent out or set aside for open orders: what can be borrowed or withdrawn. */
+	available: number;
+	/** What borrowers owe, interest included. */
+	lent: number;
+	utilization_bps: number;
+	/** What lenders earn now: the interest borrowers pay, spread over the whole pool. */
+	lender_rate_bps: number;
+	base_rate_bps: number;
+	rates: RatioRate[];
+	/** Equity, as a share of holdings, below which a borrower is liquidated. */
+	maintenance_margin_bps: number;
+	/** The most one order may borrow now, and that limit as a share of value. */
+	max_trade_loan: number;
+	max_trade_loan_bps: number;
+	/** The most one trader may owe now, and that limit as a share of value. */
+	max_trader_loan: number;
+	max_trader_loan_bps: number;
+	lenders: number;
+	borrowers: number;
+}
+
+/** The signed-in trader's side of the pool. */
+export interface PoolStake {
+	status: AccountStatus;
+	/** Cash not held for open orders. */
+	cash_available: number;
+	pool_shares: number;
+	pool_value: number;
+	owed: number;
+}
+
+export interface PoolView {
+	pool: PoolSummary;
+	you: PoolStake | null;
+}
+
 /** A market news story. */
 export interface Article {
 	id: string;
@@ -134,7 +200,7 @@ export interface Article {
 	body?: string;
 	/** The symbol's price when the story broke. */
 	price: number;
-	/** The price the story moves it towards. */
+	/** The price the story moves it towards, or 0 for admin news, which has none. */
 	target: number;
 }
 
@@ -162,6 +228,8 @@ export interface OrderRequest {
 	limit_price?: number;
 	max_cost?: number;
 	time_in_force?: TimeInForce;
+	/** A buy's leverage ratio: it borrows all but 1/leverage of its cost from the lending pool. */
+	leverage?: number;
 }
 
 export interface Order extends Required<OrderRequest> {
@@ -264,6 +332,22 @@ export class Api {
 	leaderboard(limit = 100) {
 		return this.request<Leaderboard>('GET', `/v1/leaderboard?limit=${limit}`);
 	}
+	async bankruptcies(limit = 100) {
+		return (await this.request<{ bankruptcies: Bankruptcy[] }>('GET', `/v1/leaderboard/bankruptcies?limit=${limit}`)).bankruptcies;
+	}
+	pool() {
+		return this.request<PoolView>('GET', '/v1/pool');
+	}
+	lend(amount: number) {
+		return this.request<PoolView>('POST', '/v1/pool/lend', { amount });
+	}
+	/** Takes cash out of your pool stake, or all of it. */
+	withdrawFromPool(amount: number | 'all') {
+		return this.request<PoolView>('POST', '/v1/pool/withdraw', amount === 'all' ? { all: true } : { amount });
+	}
+	repay(amount: number) {
+		return this.request<PoolView>('POST', '/v1/pool/repay', { amount });
+	}
 	/** News, newest first, for one symbol or all of them. */
 	async news(symbol?: string, limit = 100) {
 		const q = symbol ? `&symbol=${encodeURIComponent(symbol)}` : '';
@@ -280,8 +364,8 @@ export class Api {
 	adjustCash(accountId: string, amount: number) {
 		return this.request<Account>('POST', `/v1/admin/accounts/${encodeURIComponent(accountId)}/cash`, { amount });
 	}
-	/** Publishes a story and has the news market maker move the price by `change` percent. */
-	breakNews(symbol: string, change: number, headline: string) {
-		return this.request<Article>('POST', '/v1/admin/news', { symbol, change, headline });
+	/** Publishes a story and has the news market maker market buy `quantity` shares. */
+	breakNews(symbol: string, quantity: number, headline: string) {
+		return this.request<Article>('POST', '/v1/admin/news', { symbol, quantity, headline });
 	}
 }

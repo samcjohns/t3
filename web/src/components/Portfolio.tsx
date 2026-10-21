@@ -97,8 +97,24 @@ export function Portfolio({ api, portfolio, prices, symbols, tick, onSelect }: P
 							<dt>Invested</dt>
 							<dd>{priced.length ? money(cost) : '—'}</dd>
 						</div>
+						{portfolio.owed > 0 && (
+							<div>
+								<dt>Borrowed</dt>
+								<dd class="down">{money(portfolio.owed)}</dd>
+							</div>
+						)}
+						{portfolio.pool_value > 0 && (
+							<div>
+								<dt>Lent to pool</dt>
+								<dd>{money(portfolio.pool_value)}</dd>
+							</div>
+						)}
 					</dl>
 				</header>
+				{portfolio.status === 'liquidating' && (
+					<p class="notice err">Your equity fell below the maintenance margin. Your shares are being sold to repay what you borrowed.</p>
+				)}
+				{portfolio.status === 'bankrupt' && <p class="notice err">Your account went bankrupt and is closed.</p>}
 
 				<div class="chart-controls">
 					<div class="segmented small" role="radiogroup" aria-label="Candle interval">

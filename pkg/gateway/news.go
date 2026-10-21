@@ -21,7 +21,7 @@ type Article struct {
 	Headline string    `json:"headline"`
 	Body     string    `json:"body,omitempty"`
 	// Price is the symbol's price when the story broke, and Target the
-	// price the story moves it towards.
+	// price the story moves it towards, or 0 for admin news, which has none.
 	Price  int64 `json:"price"`
 	Target int64 `json:"target"`
 }

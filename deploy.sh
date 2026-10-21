@@ -4,10 +4,15 @@
 #
 # Usage: ./deploy.sh [--skip-pull]
 #
-# Secrets come from the environment or a .env file next to this script
-# (git-ignored), e.g.:
+# Settings come from the environment or a .env file next to this script
+# (git-ignored). On a first deploy (no t3-pgdata volume yet), any missing
+# password is generated and saved to .env. e.g.:
 #   T3_ADMIN_PASSWORD=...
 #   T3_MARKET_MAKER_PASSWORD=...
+#   T3_STARTING_CASH=1000000   # cents for each new trader
+#   T3_LENDING_RATE_BPS=500    # lending pool base rate, basis points a day
+#   T3_MAX_TRADE_LOAN_BPS=500     # most one order may borrow, bps of the pool
+#   T3_MAX_TRADER_LOAN_BPS=5000   # most one trader may owe, bps of the pool
 #   T3_PORT=8080          # API host port, when not using an edge network
 #   T3_WEB_PORT=3000      # web app host port, likewise
 #   T3_EDGE_NETWORK=edge  # optional: serve via a proxy/tunnel on this network
@@ -26,7 +31,7 @@ main() {
 		case "$arg" in
 		--skip-pull) pull=false ;;
 		-h | --help)
-			sed -n '2,17p' "$0"
+			sed -n '2,23p' "$0"
 			exit 0
 			;;
 		*) die "unknown argument: $arg (try --help)" ;;
@@ -36,17 +41,22 @@ main() {
 	command -v git >/dev/null || die "git is not installed"
 	docker compose version >/dev/null 2>&1 || die "docker compose is not available"
 
-	if [[ -f .env ]]; then
-		set -a
-		# shellcheck disable=SC1091
-		source .env
-		set +a
-	fi
+	load_env
+	local fresh=false
+	docker volume inspect t3-pgdata >/dev/null 2>&1 || fresh=true
 	for var in T3_ADMIN_PASSWORD T3_MARKET_MAKER_PASSWORD; do
-		if [[ -z "${!var:-}" ]]; then
+		[[ -n "${!var:-}" ]] && continue
+		if $fresh; then
+			command -v openssl >/dev/null || die "openssl is needed to generate $var; install it or set $var in .env"
+			# Built-in users keep the password they were created with, so a
+			# secret can only be chosen before the first start.
+			save_env "$var" "$(openssl rand -base64 24 | tr -d '/+=')"
+			step "Generated $var and saved it to .env"
+		else
 			warn "$var is not set; using the development default from docker-compose.yml"
 		fi
 	done
+	validate_settings
 
 	compose=(docker compose -f docker-compose.yml)
 	local web="http://localhost:${T3_WEB_PORT:-3000}" api="http://localhost:${T3_PORT:-8080}"
@@ -75,6 +85,9 @@ main() {
 	fi
 	step "Deploying $(git rev-parse --short HEAD): $(git log -1 --format=%s)"
 
+	step "Checking Compose configuration"
+	"${compose[@]}" config --quiet
+
 	step "Building images"
 	"${compose[@]}" build --pull
 
@@ -86,6 +99,41 @@ main() {
 
 	"${compose[@]}" ps --format 'table {{.Name}}\t{{.Status}}'
 	step "t3 is up: web app at $web, API at $api"
+}
+
+load_env() {
+	[[ -f .env ]] || return 0
+	set -a
+	# shellcheck disable=SC1091
+	source .env
+	set +a
+}
+
+# save_env appends $1=$2 to .env, readable only by its owner, and exports it.
+save_env() {
+	touch .env
+	chmod 600 .env
+	[[ -z "$(tail -c1 .env)" ]] || echo >>.env
+	printf '%s=%s\n' "$1" "$2" >>.env
+	export "$1=$2"
+}
+
+# validate_settings rejects malformed optional settings before anything is
+# built, rather than leaving the server to crash-loop on startup.
+validate_settings() {
+	local var
+	for var in T3_STARTING_CASH T3_MARKET_MAKER_CASH; do
+		[[ -z "${!var:-}" || "${!var}" =~ ^[0-9]+$ ]] || die "$var must be a whole number of cents, got '${!var}'"
+	done
+	[[ -z "${T3_LENDING_RATE_BPS:-}" || "$T3_LENDING_RATE_BPS" =~ ^[1-9][0-9]*$ ]] ||
+		die "T3_LENDING_RATE_BPS must be a positive whole number of basis points a day, got '$T3_LENDING_RATE_BPS'"
+	for var in T3_MAX_TRADE_LOAN_BPS T3_MAX_TRADER_LOAN_BPS; do
+		[[ -z "${!var:-}" ]] || { [[ "${!var}" =~ ^[1-9][0-9]*$ ]] && ((${!var} <= 10000)); } ||
+			die "$var must be 1-10000 basis points of the lending pool, got '${!var}'"
+	done
+	for var in T3_PORT T3_WEB_PORT; do
+		[[ -z "${!var:-}" || "${!var}" =~ ^[0-9]+$ ]] || die "$var must be a port number, got '${!var}'"
+	done
 }
 
 # wait_healthy waits for container $1 (Compose service $2) to pass its health
