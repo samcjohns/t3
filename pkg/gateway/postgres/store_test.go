@@ -60,6 +60,9 @@ func TestUserStore(t *testing.T) {
 	if traders, err := s.Traders(ctx); err != nil || !reflect.DeepEqual(traders, []gateway.User{rec.User}) {
 		t.Fatalf("Traders = %+v %v", traders, err)
 	}
+	if makers, err := s.MarketMakers(ctx); err != nil || len(makers) != 1 || makers[0].ID != "usr_mm" {
+		t.Fatalf("MarketMakers = %+v %v", makers, err)
+	}
 
 	// Password changes and signing out other sessions.
 	if err := s.SetPassword(ctx, "usr_1", []byte("s2"), []byte("h2")); err != nil {
@@ -145,5 +148,41 @@ func TestNewsStore(t *testing.T) {
 	got, err = s.Articles(ctx, "ACME", 10)
 	if err != nil || !reflect.DeepEqual(got, []gateway.Article{articles[2], articles[0]}) {
 		t.Fatalf("ACME Articles = %+v %v", got, err)
+	}
+}
+
+func TestMakerStore(t *testing.T) {
+	ctx := context.Background()
+	pool := pgtest.New(t)
+	users, err := NewUserStore(ctx, pool)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s, err := NewMakerStore(ctx, pool)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mm := gateway.UserRecord{User: gateway.User{ID: "usr_mm", Username: "mm-flow", Role: gateway.RoleMarketMaker}, Salt: []byte("s"), Hash: []byte("h")}
+	if err := users.CreateUser(ctx, mm); err != nil {
+		t.Fatal(err)
+	}
+	if c, err := s.MakerControl(ctx, "usr_mm"); err != nil || c.Paused || len(c.Overrides) != 0 {
+		t.Fatalf("unset MakerControl = %+v %v", c, err)
+	}
+	want := gateway.MakerControl{Paused: true, Overrides: map[string]float64{"activity": 0.9, "notional": 25000}}
+	if err := s.SetMakerControl(ctx, "usr_mm", want); err != nil {
+		t.Fatal(err)
+	}
+	if c, err := s.MakerControl(ctx, "usr_mm"); err != nil || !reflect.DeepEqual(c, want) {
+		t.Fatalf("MakerControl = %+v %v", c, err)
+	}
+	if err := s.SetMakerControl(ctx, "usr_mm", gateway.MakerControl{}); err != nil {
+		t.Fatal(err)
+	}
+	if c, err := s.MakerControl(ctx, "usr_mm"); err != nil || c.Paused || len(c.Overrides) != 0 {
+		t.Fatalf("cleared MakerControl = %+v %v", c, err)
+	}
+	if err := users.DeleteUser(ctx, "usr_mm"); err != nil {
+		t.Fatalf("deleting a maker with controls: %v", err)
 	}
 }

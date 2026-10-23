@@ -836,3 +836,171 @@ func TestLendingPool(t *testing.T) {
 		t.Fatalf("bankruptcies = %v", b.body)
 	}
 }
+
+func TestModeration(t *testing.T) {
+	e := newEnv(t, nil)
+	admin := e.admin()
+	bob, bobID := e.trader("bob")
+	alice, _ := e.trader("alice")
+	e.expect(e.do("POST", "/v1/admin/accounts/"+bobID+"/shares", admin, map[string]any{"symbol": "ACME", "quantity": 10}), http.StatusOK)
+	sell := map[string]any{"symbol": "ACME", "direction": "SELL", "type": "LIMIT", "quantity": 1, "limit_price": 1000}
+
+	e.expect(e.do("POST", "/v1/admin/accounts/"+bobID+"/block", bob, map[string]bool{"blocked": true}), http.StatusForbidden)
+	e.expect(e.do("POST", "/v1/admin/accounts/usr_ghost/block", admin, map[string]bool{"blocked": true}), http.StatusNotFound)
+	r := e.expect(e.do("POST", "/v1/admin/accounts/"+bobID+"/block", admin, map[string]bool{"blocked": true}), http.StatusOK)
+	if r.body["blocked"] != true {
+		t.Fatalf("blocked account = %v", r.body)
+	}
+	if r := e.do("POST", "/v1/orders", bob, sell); r.errorCode() != "account_blocked" {
+		t.Fatalf("blocked order = %d %v", r.status, r.body)
+	}
+	users := e.expect(e.do("GET", "/v1/admin/users", admin, nil), http.StatusOK).body["users"].([]any)
+	if u := users[1].(map[string]any); u["username"] != "bob" || u["blocked"] != true || u["status"] != "active" {
+		t.Fatalf("admin users = %v", users)
+	}
+	e.expect(e.do("POST", "/v1/admin/accounts/"+bobID+"/block", admin, map[string]bool{"blocked": false}), http.StatusOK)
+	e.expect(e.do("POST", "/v1/orders", bob, sell), http.StatusAccepted)
+
+	r = e.expect(e.do("POST", "/v1/admin/accounts/"+bobID+"/liquidate", admin, nil), http.StatusOK)
+	if r.body["status"] != "liquidating" {
+		t.Fatalf("liquidating account = %v", r.body)
+	}
+	if r := e.do("POST", "/v1/orders", bob, sell); r.errorCode() != "account_liquidating" {
+		t.Fatalf("order while liquidating = %d %v", r.status, r.body)
+	}
+
+	e.expect(e.do("DELETE", "/v1/admin/users/"+bobID, alice, nil), http.StatusForbidden)
+	e.expect(e.do("DELETE", "/v1/admin/users/"+bobID, admin, nil), http.StatusNoContent)
+	e.expect(e.do("GET", "/v1/account", bob, nil), http.StatusUnauthorized)
+	e.expect(e.do("DELETE", "/v1/admin/users/"+bobID, admin, nil), http.StatusNotFound)
+	if acct, _ := e.ledger.Account(bobID); !acct.Blocked {
+		t.Fatalf("deleted user's account = %+v, want blocked", acct)
+	}
+	users = e.expect(e.do("GET", "/v1/admin/users", admin, nil), http.StatusOK).body["users"].([]any)
+	if len(users) != 1 {
+		t.Fatalf("admin users after delete = %v", users)
+	}
+}
+
+func TestMarketMakerControls(t *testing.T) {
+	e := newEnv(t, nil)
+	admin := e.admin()
+	bob, bobID := e.trader("bob")
+	mm, err := e.gw.CreateUser(context.Background(), "mm-flow", "maker password", RoleMarketMaker)
+	if err != nil {
+		t.Fatal(err)
+	}
+	maker := e.expect(e.do("POST", "/v1/auth/login", "", map[string]string{"username": "mm-flow", "password": "maker password"}), http.StatusOK).body["token"].(string)
+	control := "/v1/admin/makers/" + mm.ID + "/control"
+
+	e.expect(e.do("GET", "/v1/admin/makers", bob, nil), http.StatusForbidden)
+	makers := e.expect(e.do("GET", "/v1/admin/makers", admin, nil), http.StatusOK).body["makers"].([]any)
+	if len(makers) != 1 || makers[0].(map[string]any)["username"] != "mm-flow" || makers[0].(map[string]any)["online"] != false {
+		t.Fatalf("makers before sync = %v", makers)
+	}
+
+	// Settings are unknown until the maker syncs, but it can be paused.
+	if r := e.do("POST", control, admin, map[string]any{"overrides": map[string]float64{"activity": 0.9}}); r.errorCode() != "maker_offline" {
+		t.Fatalf("override before sync = %d %v", r.status, r.body)
+	}
+	e.expect(e.do("POST", "/v1/admin/makers/"+bobID+"/control", admin, map[string]any{"paused": true}), http.StatusNotFound)
+	e.expect(e.do("POST", control, admin, map[string]any{"paused": true}), http.StatusOK)
+
+	report := map[string]any{"strategy": "flow", "settings": []map[string]any{
+		{"key": "activity", "label": "Activity", "unit": "fraction", "default": 0.5, "min": 0, "max": 1, "integer": false},
+		{"key": "notional", "label": "Order size", "unit": "cents", "default": 50000, "min": 100, "max": 1e10, "integer": true},
+	}}
+	e.expect(e.do("POST", "/v1/maker/sync", bob, report), http.StatusForbidden)
+	e.expect(e.do("POST", "/v1/maker/sync", admin, report), http.StatusForbidden)
+	r := e.expect(e.do("POST", "/v1/maker/sync", maker, report), http.StatusOK)
+	if r.body["paused"] != true || len(r.body["overrides"].(map[string]any)) != 0 {
+		t.Fatalf("sync = %v", r.body)
+	}
+
+	for _, bad := range []map[string]float64{{"nope": 1}, {"activity": 1.5}, {"notional": 100.5}} {
+		if r := e.do("POST", control, admin, map[string]any{"overrides": bad}); r.status != http.StatusBadRequest {
+			t.Fatalf("override %v = %d %v", bad, r.status, r.body)
+		}
+	}
+	r = e.expect(e.do("POST", control, admin, map[string]any{"paused": false, "overrides": map[string]float64{"activity": 0.9}}), http.StatusOK)
+	settings := r.body["settings"].([]any)
+	if r.body["paused"] != false || r.body["strategy"] != "flow" || r.body["online"] != true || len(settings) != 2 {
+		t.Fatalf("maker after control = %v", r.body)
+	}
+	if s := settings[0].(map[string]any); s["value"] != 0.9 || s["overridden"] != true {
+		t.Fatalf("overridden setting = %v", s)
+	}
+	if s := settings[1].(map[string]any); num(s["value"]) != 50000 || s["overridden"] != false {
+		t.Fatalf("default setting = %v", s)
+	}
+	r = e.expect(e.do("POST", "/v1/maker/sync", maker, report), http.StatusOK)
+	if r.body["paused"] != false || !reflect.DeepEqual(r.body["overrides"], map[string]any{"activity": 0.9}) {
+		t.Fatalf("sync after control = %v", r.body)
+	}
+	// Leaving overrides out keeps them; an empty object clears them.
+	e.expect(e.do("POST", control, admin, map[string]any{"paused": true}), http.StatusOK)
+	if r := e.expect(e.do("POST", "/v1/maker/sync", maker, report), http.StatusOK); len(r.body["overrides"].(map[string]any)) != 1 {
+		t.Fatalf("overrides after pause = %v", r.body)
+	}
+	e.expect(e.do("POST", control, admin, map[string]any{"overrides": map[string]float64{}}), http.StatusOK)
+	if r := e.expect(e.do("POST", "/v1/maker/sync", maker, report), http.StatusOK); len(r.body["overrides"].(map[string]any)) != 0 {
+		t.Fatalf("overrides after reset = %v", r.body)
+	}
+
+	e.clock.advance(2 * time.Minute)
+	makers = e.expect(e.do("GET", "/v1/admin/makers", admin, nil), http.StatusOK).body["makers"].([]any)
+	if m := makers[0].(map[string]any); m["online"] != false || m["strategy"] != "flow" {
+		t.Fatalf("maker after silence = %v", m)
+	}
+}
+
+func TestForceMakerOrders(t *testing.T) {
+	e := newEnv(t, nil)
+	admin := e.admin()
+	bob, bobID := e.trader("bob")
+	mm, err := e.gw.CreateUser(context.Background(), "mm-flow", "maker password", RoleMarketMaker)
+	if err != nil {
+		t.Fatal(err)
+	}
+	orders := "/v1/admin/makers/" + mm.ID + "/orders"
+
+	// Funds use the same endpoints as for traders.
+	e.expect(e.do("POST", "/v1/admin/accounts/"+mm.ID+"/cash", admin, map[string]int64{"amount": 50_000}), http.StatusOK)
+	e.expect(e.do("POST", "/v1/admin/accounts/"+mm.ID+"/cash", admin, map[string]int64{"amount": -10_000}), http.StatusOK)
+	e.expect(e.do("POST", "/v1/admin/accounts/"+mm.ID+"/shares", admin, map[string]any{"symbol": "ACME", "quantity": 10}), http.StatusOK)
+
+	sell := map[string]any{"symbol": "ACME", "direction": "SELL", "type": "LIMIT", "quantity": 4, "limit_price": 1000}
+	e.expect(e.do("POST", orders, bob, sell), http.StatusForbidden)
+	e.expect(e.do("POST", "/v1/admin/makers/"+bobID+"/orders", admin, sell), http.StatusNotFound)
+	if r := e.do("POST", orders, admin, map[string]any{"symbol": "ACME", "direction": "BUY", "type": "LIMIT", "quantity": 1, "limit_price": 1000, "leverage": 2}); r.status != http.StatusBadRequest {
+		t.Fatalf("leveraged forced order = %d %v", r.status, r.body)
+	}
+	r := e.expect(e.do("POST", orders, admin, sell), http.StatusAccepted)
+	if r.body["account_id"] != mm.ID || r.body["time_in_force"] != "IOC" {
+		t.Fatalf("forced sell = %v", r.body)
+	}
+	e.expect(e.do("POST", "/v1/orders", bob, map[string]any{"symbol": "ACME", "direction": "BUY", "type": "LIMIT", "quantity": 4, "limit_price": 1000}), http.StatusAccepted)
+
+	// A market buy without max_cost may spend twice its quantity at the
+	// last price, capped by available cash.
+	r = e.expect(e.do("POST", orders, admin, map[string]any{"symbol": "ZED", "direction": "BUY", "type": "MARKET", "quantity": 5}), http.StatusAccepted)
+	if num(r.body["max_cost"]) != 2*5*2000 {
+		t.Fatalf("forced market buy = %v", r.body)
+	}
+	r = e.expect(e.do("POST", orders, admin, map[string]any{"symbol": "ZED", "direction": "BUY", "type": "MARKET", "quantity": 500}), http.StatusAccepted)
+	if num(r.body["max_cost"]) != 40_000-20_000 {
+		t.Fatalf("capped forced market buy = %v", r.body)
+	}
+	if r := e.do("POST", orders, admin, map[string]any{"symbol": "ZED", "direction": "BUY", "type": "MARKET", "quantity": 1}); r.errorCode() != "insufficient_funds" {
+		t.Fatalf("market buy without cash = %d %v", r.status, r.body)
+	}
+
+	e.tick()
+	acct, err := e.ledger.Account(mm.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if acct.CashHeld != 0 || acct.Cash != 40_000+4_000 || len(acct.Holdings) != 1 || acct.Holdings[0].Quantity != 6 {
+		t.Fatalf("maker after forced trades = %+v", acct)
+	}
+}

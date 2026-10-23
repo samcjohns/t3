@@ -67,7 +67,15 @@ func (s *UserStore) UserByName(ctx context.Context, username string) (gateway.Us
 }
 
 func (s *UserStore) Traders(ctx context.Context) ([]gateway.User, error) {
-	rows, err := s.pool.Query(ctx, `SELECT id, username, role, created_at FROM gateway.users WHERE role = $1 ORDER BY username`, gateway.RoleTrader)
+	return s.withRole(ctx, gateway.RoleTrader)
+}
+
+func (s *UserStore) MarketMakers(ctx context.Context) ([]gateway.User, error) {
+	return s.withRole(ctx, gateway.RoleMarketMaker)
+}
+
+func (s *UserStore) withRole(ctx context.Context, role gateway.Role) ([]gateway.User, error) {
+	rows, err := s.pool.Query(ctx, `SELECT id, username, role, created_at FROM gateway.users WHERE role = $1 ORDER BY username`, role)
 	if err != nil {
 		return nil, err
 	}

@@ -74,7 +74,7 @@ func run(log *slog.Logger) error {
 		return fmt.Errorf("T3_MM_STRATEGY must be liquidity, flow, momentum or news")
 	}
 	log.Info("market maker started", "api", api, "symbols", len(tickers))
-	return marketmaker.Run(ctx, client, s, marketmaker.Config{Logger: log})
+	return marketmaker.Run(ctx, client, s, marketmaker.Config{Strategy: strategy, Logger: log})
 }
 
 func env(key, fallback string) string {

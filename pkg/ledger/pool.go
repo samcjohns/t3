@@ -370,6 +370,9 @@ func (a *account) canTrade() error {
 	case StatusBankrupt:
 		return ErrAccountClosed
 	}
+	if a.blocked {
+		return ErrAccountBlocked
+	}
 	return nil
 }
 
@@ -746,11 +749,47 @@ func (l *Ledger) Bankruptcies() []Bankruptcy {
 
 // Liquidation is what the host must do in the engine for accounts being
 // liquidated: cancel their open orders, then submit market sells of their
-// available shares. The sells' holds are already placed; release any the
+// available shares. Blocked accounts have their open orders cancelled too. The sells' holds are already placed; release any the
 // engine rejects.
 type Liquidation struct {
 	Cancel []string
 	Sell   []engine.Order
+}
+
+// SetBlocked blocks an account from placing orders and lending, or lifts
+// the block. Liquidations cancels a blocked account's open orders.
+func (l *Ledger) SetBlocked(ctx context.Context, accountID string, blocked bool) error {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	t := l.begin()
+	a, err := t.account(accountID)
+	if err != nil {
+		return err
+	}
+	a.blocked = blocked
+	return t.commit(ctx)
+}
+
+// Liquidate starts liquidating an account at an admin's request, as if it
+// had fallen below the maintenance margin: its open orders are cancelled and
+// its shares sold at market. Once everything is sold, its cash repays what it
+// owes and it becomes active again, or bankrupt if it cannot repay.
+func (l *Ledger) Liquidate(ctx context.Context, accountID string) error {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	t := l.begin()
+	a, err := t.account(accountID)
+	if err != nil {
+		return err
+	}
+	switch a.status {
+	case StatusBankrupt:
+		return ErrAccountClosed
+	case StatusLiquidating:
+		return nil
+	}
+	a.status = StatusLiquidating
+	return t.commit(ctx)
 }
 
 // Liquidations returns the next steps of every liquidation. Call it after
@@ -763,13 +802,17 @@ func (l *Ledger) Liquidations(ctx context.Context) (Liquidation, error) {
 	var out Liquidation
 	t := l.begin()
 	for _, id := range slices.Sorted(maps.Keys(l.accounts)) {
-		if l.accounts[id].status != StatusLiquidating {
+		acc := l.accounts[id]
+		if acc.status != StatusLiquidating && !acc.blocked {
 			continue
 		}
 		for _, oid := range slices.Sorted(maps.Keys(l.holds)) {
 			if l.holds[oid].order.AccountID == id && !strings.HasPrefix(oid, liquidationPrefix) {
 				out.Cancel = append(out.Cancel, oid)
 			}
+		}
+		if acc.status != StatusLiquidating {
+			continue
 		}
 		a, _ := t.account(id)
 		for _, sym := range slices.Sorted(maps.Keys(a.shares)) {

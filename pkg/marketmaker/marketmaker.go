@@ -74,6 +74,8 @@ type Client interface {
 	// ClaimNewsAlerts returns the news admins have broken since the last
 	// claim, by anyone.
 	ClaimNewsAlerts(ctx context.Context) ([]NewsAlert, error)
+	// Sync reports the maker's settings and returns what admins have set.
+	Sync(ctx context.Context, r Report) (Control, error)
 }
 
 // Strategy decides a tick's orders. It may keep state between calls.
@@ -118,11 +120,15 @@ type Config struct {
 	Poll time.Duration
 	// Delay is how long to wait after seeing a new tick before trading, so
 	// the ledger has settled. Default 500ms.
-	Delay  time.Duration
-	Logger *slog.Logger
+	Delay time.Duration
+	// Strategy names the strategy to admins.
+	Strategy string
+	Logger   *slog.Logger
 }
 
-// Run trades once per tick until ctx is cancelled.
+// Run trades once per tick until ctx is cancelled. Each tick it first syncs
+// with the exchange, applying admins' setting overrides and skipping the tick
+// while paused. If a sync fails it keeps the last settings it had.
 func Run(ctx context.Context, c Client, s Strategy, cfg Config) error {
 	if cfg.Poll <= 0 {
 		cfg.Poll = time.Second
@@ -134,6 +140,8 @@ func Run(ctx context.Context, c Client, s Strategy, cfg Config) error {
 		cfg.Logger = slog.Default()
 	}
 	log := cfg.Logger
+	report := Report{Strategy: cfg.Strategy, Settings: Settings(s)}
+	var ctl Control
 	last := uint64(math.MaxUint64)
 	t := time.NewTicker(cfg.Poll)
 	defer t.Stop()
@@ -145,8 +153,22 @@ func Run(ctx context.Context, c Client, s Strategy, cfg Config) error {
 			if err := sleep(ctx, cfg.Delay); err != nil {
 				return err
 			}
-			placed, rejected := trade(ctx, c, s, snap, log)
-			log.Debug("traded", "tick", snap.Tick, "placed", placed, "rejected", rejected)
+			if next, err := c.Sync(ctx, report); err != nil {
+				log.Warn("syncing settings", "err", err)
+			} else {
+				if !maps.Equal(next.Overrides, ctl.Overrides) {
+					Configure(s, report.Settings, next.Overrides)
+					log.Info("settings changed", "overrides", next.Overrides)
+				}
+				if next.Paused != ctl.Paused {
+					log.Info("paused by admin", "paused", next.Paused)
+				}
+				ctl = next
+			}
+			if !ctl.Paused {
+				placed, rejected := trade(ctx, c, s, snap, log)
+				log.Debug("traded", "tick", snap.Tick, "placed", placed, "rejected", rejected)
+			}
 		}
 		select {
 		case <-ctx.Done():
@@ -599,5 +621,5 @@ func (n *News) headline(price, ref int64) story {
 	}
 	lo, hi := float64(ref)*(1-n.MaxDeviation), float64(ref)*(1+n.MaxDeviation)
 	target := math.Max(lo, math.Min(hi, float64(price)*(1+impact)))
-	return story{target: max(1, int64(math.Round(target))), ticks: n.MinTicks + n.rng.IntN(n.MaxTicks-n.MinTicks+1)}
+	return story{target: max(1, int64(math.Round(target))), ticks: n.MinTicks + n.rng.IntN(max(0, n.MaxTicks-n.MinTicks)+1)}
 }

@@ -516,6 +516,9 @@ type fakeClient struct {
 	snaps       []Snapshot
 	i           int
 	onExhausted func()
+	// controls are returned by successive syncs, the last one repeated.
+	controls []Control
+	reports  []Report
 }
 
 func (f *fakeClient) Tickers(context.Context) ([]Ticker, error) { return nil, nil }
@@ -533,7 +536,117 @@ func (f *fakeClient) PublishNews(context.Context, Article) error { return nil }
 func (f *fakeClient) ClaimNewsAlerts(context.Context) ([]NewsAlert, error) {
 	return nil, nil
 }
+func (f *fakeClient) Sync(_ context.Context, r Report) (Control, error) {
+	f.reports = append(f.reports, r)
+	if len(f.controls) == 0 {
+		return Control{}, nil
+	}
+	c := f.controls[0]
+	if len(f.controls) > 1 {
+		f.controls = f.controls[1:]
+	}
+	return c, nil
+}
+
+// TestRunFollowsControls checks Run reports the strategy's settings, skips
+// ticks while paused, and applies overrides, reverting to defaults when they
+// are cleared.
+func TestRunFollowsControls(t *testing.T) {
+	c := &fakeClient{
+		snaps: []Snapshot{{Tick: 1}, {Tick: 2}, {Tick: 3}, {Tick: 4}},
+		controls: []Control{
+			{Paused: true},
+			{Overrides: map[string]float64{"activity": 0.9, "notional": 1234}},
+			{Overrides: map[string]float64{"activity": 0.9, "notional": 1234, "aggression": 7}},
+			{},
+		},
+	}
+	f := &recordingFlow{Flow: NewFlow(1)}
+	ctx, cancel := context.WithCancel(ctx)
+	c.onExhausted = cancel
+	Run(ctx, c, f, Config{Poll: time.Millisecond, Delay: time.Millisecond, Strategy: "flow", Logger: slog.New(slog.DiscardHandler)})
+
+	if len(c.reports) != 4 || c.reports[0].Strategy != "flow" || len(c.reports[0].Settings) != 4 {
+		t.Fatalf("reports = %+v", c.reports)
+	}
+	type seen struct {
+		activity, aggression float64
+		notional             int64
+	}
+	want := []seen{{0.9, 0.003, 1234}, {0.9, 0.003, 1234}, {0.5, 0.003, 50_000}}
+	if len(f.seen) != len(want) {
+		t.Fatalf("traded %d ticks, want %d (one paused)", len(f.seen), len(want))
+	}
+	for i, s := range f.seen {
+		if got := (seen{s.Activity, s.Aggression, s.Notional}); got != want[i] {
+			t.Errorf("tick %d settings = %+v, want %+v", i, got, want[i])
+		}
+	}
+}
+
+// recordingFlow records the settings in force each time it trades.
+type recordingFlow struct {
+	*Flow
+	seen []Flow
+}
+
+func (r *recordingFlow) Orders(snap Snapshot, acct Account) []Order {
+	r.seen = append(r.seen, *r.Flow)
+	return nil
+}
+
+func TestNewsSurvivesInvertedStoryLength(t *testing.T) {
+	n := NewNews([]Ticker{{"ACME", 1000}}, 1)
+	Configure(n, Settings(n), map[string]float64{"rate": 1, "min_ticks": 9, "max_ticks": 2})
+	if n.MinTicks != 9 || n.MaxTicks != 2 {
+		t.Fatalf("settings not applied: %+v", n)
+	}
+	for range 20 {
+		n.Orders(Snapshot{Prices: []Price{{"ACME", 1000}}}, Account{Cash: 1_000_000})
+	}
+}
 
 type countingStrategy struct{ calls int }
 
 func (s *countingStrategy) Orders(Snapshot, Account) []Order { s.calls++; return nil }
+
+// TestSyncOverHTTP checks every strategy's settings report is accepted by the
+// real gateway, and overrides an admin sets come back to the maker.
+func TestSyncOverHTTP(t *testing.T) {
+	x := newExchange(t)
+	for _, r := range startMakers(t, x) {
+		ctl, err := r.client.Sync(ctx, Report{Strategy: "test", Settings: Settings(r.strategy)})
+		if err != nil || ctl.Paused || len(ctl.Overrides) != 0 {
+			t.Fatalf("%s: Sync = %+v, %v", r.client.Username, ctl, err)
+		}
+	}
+
+	if _, err := x.gw.CreateUser(ctx, "root", "admin password", gateway.RoleAdmin); err != nil {
+		t.Fatal(err)
+	}
+	admin := NewHTTPClient(x.url, "root", "admin password")
+	var list struct {
+		Makers []struct {
+			ID       string `json:"id"`
+			Username string `json:"username"`
+		} `json:"makers"`
+	}
+	if _, err := admin.do(ctx, "GET", "/v1/admin/makers", nil, &list, true); err != nil || len(list.Makers) != len(makers) {
+		t.Fatalf("admin makers = %+v, %v", list, err)
+	}
+	var flowID string
+	for _, m := range list.Makers {
+		if m.Username == "mm-flow" {
+			flowID = m.ID
+		}
+	}
+	body := map[string]any{"paused": true, "overrides": map[string]float64{"activity": 0.25}}
+	if _, err := admin.do(ctx, "POST", "/v1/admin/makers/"+flowID+"/control", body, nil, true); err != nil {
+		t.Fatal(err)
+	}
+	c := NewHTTPClient(x.url, "mm-flow", "maker password")
+	ctl, err := c.Sync(ctx, Report{Strategy: "flow", Settings: Settings(NewFlow(1))})
+	if err != nil || !ctl.Paused || ctl.Overrides["activity"] != 0.25 {
+		t.Fatalf("Sync after admin control = %+v, %v", ctl, err)
+	}
+}

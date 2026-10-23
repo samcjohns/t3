@@ -49,6 +49,8 @@ type Ledger interface {
 	Repay(ctx context.Context, accountID string, amount int64) (int64, error)
 	Pool() ledger.PoolSummary
 	Bankruptcies() []ledger.Bankruptcy
+	SetBlocked(ctx context.Context, accountID string, blocked bool) error
+	Liquidate(ctx context.Context, accountID string) error
 }
 
 // Reports is the reporting service port.
@@ -89,7 +91,10 @@ type Config struct {
 	// Users persists users and sessions. Defaults to an in-memory store.
 	Users UserStore
 	// News persists news articles. Defaults to an in-memory store.
-	News   NewsStore
+	News NewsStore
+	// Makers persists admins' controls over market makers. Defaults to an
+	// in-memory store.
+	Makers MakerStore
 	Logger *slog.Logger
 	Clock  func() time.Time
 }
@@ -107,6 +112,7 @@ type Gateway struct {
 	mux     *http.ServeMux
 	board   leaderboard
 	alerts  newsAlerts
+	makers  makerReports
 }
 
 func New(market Market, ldg Ledger, reports Reports, cfg Config) *Gateway {
@@ -136,6 +142,9 @@ func New(market Market, ldg Ledger, reports Reports, cfg Config) *Gateway {
 	}
 	if cfg.News == nil {
 		cfg.News = NewMemoryNewsStore()
+	}
+	if cfg.Makers == nil {
+		cfg.Makers = NewMemoryMakerStore()
 	}
 	g := &Gateway{
 		market:  market,
@@ -207,6 +216,7 @@ func (g *Gateway) routes() {
 	g.handle("GET /v1/news", public, g.getNews)
 	g.handle("POST /v1/news", maker, g.publishNews)
 	g.handle("POST /v1/news/alerts/claim", maker, g.claimNewsAlerts)
+	g.handle("POST /v1/maker/sync", maker, g.syncMaker)
 
 	g.handle("GET /v1/market/symbols", public, g.listSymbols)
 	// Served outside handle: the hottest public read skips token lookup and
@@ -220,6 +230,12 @@ func (g *Gateway) routes() {
 	g.handle("POST /v1/admin/news", admin, g.breakNews)
 	g.handle("POST /v1/admin/accounts/{id}/cash", admin, g.depositCash)
 	g.handle("POST /v1/admin/accounts/{id}/shares", admin, g.depositShares)
+	g.handle("POST /v1/admin/accounts/{id}/block", admin, g.blockTrader)
+	g.handle("POST /v1/admin/accounts/{id}/liquidate", admin, g.liquidateTrader)
+	g.handle("DELETE /v1/admin/users/{id}", admin, g.deleteTrader)
+	g.handle("GET /v1/admin/makers", admin, g.listMakers)
+	g.handle("POST /v1/admin/makers/{id}/control", admin, g.setMakerControl)
+	g.handle("POST /v1/admin/makers/{id}/orders", admin, g.forceMakerOrder)
 }
 
 // Handler returns the gateway's HTTP handler.
@@ -440,6 +456,7 @@ var errorMapping = []struct {
 	{ledger.ErrLoanLimit, http.StatusUnprocessableEntity, "loan_limit"},
 	{ledger.ErrAccountLiquidating, http.StatusConflict, "account_liquidating"},
 	{ledger.ErrAccountClosed, http.StatusForbidden, "account_closed"},
+	{ledger.ErrAccountBlocked, http.StatusForbidden, "account_blocked"},
 	{reporting.ErrUnknownSymbol, http.StatusNotFound, "unknown_symbol"},
 	{reporting.ErrInvalidInterval, http.StatusBadRequest, "invalid_interval"},
 	{ErrUsernameTaken, http.StatusConflict, "username_taken"},

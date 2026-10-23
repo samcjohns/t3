@@ -48,13 +48,13 @@ func (s *Store) Load(ctx context.Context) (ledger.State, error) {
 		}
 
 		byID := map[string]int{}
-		rows, err := tx.Query(ctx, `SELECT id, status, cash, cash_held, pool_shares, loans FROM ledger.accounts ORDER BY id`)
+		rows, err := tx.Query(ctx, `SELECT id, status, blocked, cash, cash_held, pool_shares, loans FROM ledger.accounts ORDER BY id`)
 		if err != nil {
 			return err
 		}
 		for rows.Next() {
 			a := ledger.Account{Holdings: []ledger.Holding{}}
-			if err := rows.Scan(&a.ID, &a.Status, &a.Cash, &a.CashHeld, &a.PoolShares, &a.Loans); err != nil {
+			if err := rows.Scan(&a.ID, &a.Status, &a.Blocked, &a.Cash, &a.CashHeld, &a.PoolShares, &a.Loans); err != nil {
 				return err
 			}
 			if len(a.Loans) == 0 {
@@ -149,10 +149,10 @@ func (s *Store) Apply(ctx context.Context, ch ledger.Changes) error {
 			if loans == nil {
 				loans = map[int64]*big.Int{}
 			}
-			b.Queue(`INSERT INTO ledger.accounts (id, status, cash, cash_held, pool_shares, loans) VALUES ($1, $2, $3, $4, $5, $6)
-				ON CONFLICT (id) DO UPDATE SET status = excluded.status, cash = excluded.cash, cash_held = excluded.cash_held,
-					pool_shares = excluded.pool_shares, loans = excluded.loans`,
-				a.ID, a.Status, a.Cash, a.CashHeld, a.PoolShares, loans)
+			b.Queue(`INSERT INTO ledger.accounts (id, status, blocked, cash, cash_held, pool_shares, loans) VALUES ($1, $2, $3, $4, $5, $6, $7)
+				ON CONFLICT (id) DO UPDATE SET status = excluded.status, blocked = excluded.blocked, cash = excluded.cash,
+					cash_held = excluded.cash_held, pool_shares = excluded.pool_shares, loans = excluded.loans`,
+				a.ID, a.Status, a.Blocked, a.Cash, a.CashHeld, a.PoolShares, loans)
 			symbols := make([]string, len(a.Holdings))
 			for i, h := range a.Holdings {
 				symbols[i] = h.Symbol

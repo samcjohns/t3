@@ -208,16 +208,56 @@ export interface Article {
 export interface AdminUser {
 	id: string;
 	username: string;
+	status: 'active' | 'liquidating' | 'bankrupt';
+	/** Blocked traders can't place orders or lend. */
+	blocked: boolean;
 	/** Total cash, including cash_held. */
 	cash: number;
 	cash_held: number;
 	total_value: number;
 }
 
+/** One of a market maker's tunable settings, as the maker reports it. */
+export interface MakerSetting {
+	key: string;
+	label: string;
+	/** "fraction" values are shown as percentages. */
+	unit: 'cents' | 'fraction' | 'ticks' | '';
+	/** The maker's own value, used unless overridden. */
+	default: number;
+	min: number;
+	max: number;
+	integer: boolean;
+	help?: string;
+	/** The value it trades with. */
+	value: number;
+	overridden: boolean;
+}
+
+/** A market maker as the admin page lists them. */
+export interface AdminMaker {
+	id: string;
+	username: string;
+	/** Empty until the maker first syncs after a server start. */
+	strategy: string;
+	/** Synced within the last minute. */
+	online: boolean;
+	seen_at: string | null;
+	paused: boolean;
+	settings: MakerSetting[];
+	/** Total cash, including cash_held. */
+	cash: number;
+	cash_held: number;
+	total_value: number;
+	holdings: { symbol: string; quantity: number; held: number }[];
+}
+
 /** The ledger's view of an account, as admin cash changes return it. */
 export interface Account {
 	cash: number;
 	cash_held: number;
+	status: AdminUser['status'];
+	blocked: boolean;
 }
 
 export interface OrderRequest {
@@ -363,6 +403,28 @@ export class Api {
 	/** Adds cash to an account, or removes it when amount is negative. */
 	adjustCash(accountId: string, amount: number) {
 		return this.request<Account>('POST', `/v1/admin/accounts/${encodeURIComponent(accountId)}/cash`, { amount });
+	}
+	/** Blocks a trader from placing orders and lending, cancelling their open orders, or lifts the block. */
+	setBlocked(accountId: string, blocked: boolean) {
+		return this.request<Account>('POST', `/v1/admin/accounts/${encodeURIComponent(accountId)}/block`, { blocked });
+	}
+	/** Cancels a trader's open orders and market sells all their shares. */
+	liquidate(accountId: string) {
+		return this.request<Account>('POST', `/v1/admin/accounts/${encodeURIComponent(accountId)}/liquidate`);
+	}
+	deleteUser(userId: string) {
+		return this.request<void>('DELETE', `/v1/admin/users/${encodeURIComponent(userId)}`);
+	}
+	async adminMakers() {
+		return (await this.request<{ makers: AdminMaker[] }>('GET', '/v1/admin/makers')).makers;
+	}
+	/** Pauses or resumes a market maker, or replaces its setting overrides. Omitted fields are unchanged. */
+	setMakerControl(makerId: string, control: { paused?: boolean; overrides?: Record<string, number> }) {
+		return this.request<AdminMaker>('POST', `/v1/admin/makers/${encodeURIComponent(makerId)}/control`, control);
+	}
+	/** Places an order for a market maker. It defaults to IOC; a market buy without max_cost may spend up to twice its quantity at the last price. */
+	forceMakerOrder(makerId: string, order: Omit<OrderRequest, 'leverage'>) {
+		return this.request<Order>('POST', `/v1/admin/makers/${encodeURIComponent(makerId)}/orders`, order);
 	}
 	/** Publishes a story and has the news market maker market buy `quantity` shares. */
 	breakNews(symbol: string, quantity: number, headline: string) {

@@ -111,6 +111,12 @@ func (c *HTTPClient) ClaimNewsAlerts(ctx context.Context) ([]NewsAlert, error) {
 	return out.Alerts, err
 }
 
+func (c *HTTPClient) Sync(ctx context.Context, r Report) (Control, error) {
+	var out Control
+	_, err := c.do(ctx, "POST", "/v1/maker/sync", r, &out, true)
+	return out, err
+}
+
 func (c *HTTPClient) login(ctx context.Context) error {
 	var out struct {
 		Token string `json:"token"`

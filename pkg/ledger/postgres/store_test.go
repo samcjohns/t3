@@ -247,6 +247,7 @@ func TestLeverageSurvivesRestart(t *testing.T) {
 	if a, _ := l.Account("tom"); a.Status != ledger.StatusBankrupt {
 		t.Fatalf("tom = %+v", a)
 	}
+	must(t, l.SetBlocked(ctx, "sam", true))
 
 	r, err := ledger.Open(ctx, cfg)
 	must(t, err)

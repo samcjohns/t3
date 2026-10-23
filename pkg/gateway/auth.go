@@ -74,6 +74,9 @@ type UserStore interface {
 	UserByName(ctx context.Context, username string) (u UserRecord, ok bool, err error)
 	// Traders returns every user with the trader role, in username order.
 	Traders(ctx context.Context) ([]User, error)
+	// MarketMakers returns every user with the market maker role, in
+	// username order.
+	MarketMakers(ctx context.Context) ([]User, error)
 	CreateSession(ctx context.Context, d TokenDigest, userID string, expires time.Time) error
 	// Session returns ok=false if the session does not exist.
 	Session(ctx context.Context, d TokenDigest) (u User, expires time.Time, ok bool, err error)
@@ -292,16 +295,24 @@ func (m *MemoryUserStore) UserByName(_ context.Context, username string) (UserRe
 }
 
 func (m *MemoryUserStore) Traders(_ context.Context) ([]User, error) {
+	return m.withRole(RoleTrader), nil
+}
+
+func (m *MemoryUserStore) MarketMakers(_ context.Context) ([]User, error) {
+	return m.withRole(RoleMarketMaker), nil
+}
+
+func (m *MemoryUserStore) withRole(role Role) []User {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	out := []User{}
 	for _, u := range m.byName {
-		if u.Role == RoleTrader {
+		if u.Role == role {
 			out = append(out, u.User)
 		}
 	}
 	slices.SortFunc(out, func(a, b User) int { return strings.Compare(a.Username, b.Username) })
-	return out, nil
+	return out
 }
 
 func (m *MemoryUserStore) CreateSession(_ context.Context, d TokenDigest, userID string, expires time.Time) error {

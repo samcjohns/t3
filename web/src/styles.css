@@ -1421,11 +1421,29 @@ td:not(.up):not(.down) .sub {
 .admin-form .btn-row {
 	grid-column: 1 / -1;
 }
-.admin .notice {
+.admin .notice,
+.admin .confirm {
 	margin-bottom: 12px;
 }
 tr.clickable.on td {
 	background: var(--panel-2);
+}
+.maker-section {
+	margin: 20px 0 12px;
+	padding-top: 16px;
+	border-top: 1px solid var(--line);
+}
+.maker-status {
+	align-items: center;
+	justify-content: space-between;
+	flex-wrap: wrap;
+	margin-bottom: 12px;
+}
+.admin-form label small {
+	min-height: 2.6em;
+}
+input.invalid {
+	border-color: var(--down);
 }
 @media (max-width: 760px) {
 	.admin-form {

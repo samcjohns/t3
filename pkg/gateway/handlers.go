@@ -196,35 +196,44 @@ func (g *Gateway) placeOrder(w http.ResponseWriter, r *http.Request, u *User) er
 		MaxCost:     req.MaxCost,
 		TimeInForce: req.TimeInForce,
 	}
-	if err := order.Validate(); err != nil {
-		return err
-	}
-	if err := g.halted(); err != nil {
-		return err
-	}
-
-	// Funding is reserved before the engine sees the order, so a fill can
-	// never overdraw the account.
 	leverage := max(req.Leverage, 1)
-	if err := g.ledger.ReserveLeveraged(r.Context(), order, leverage); err != nil {
-		g.metrics.inc(`t3_gateway_orders_total{result="rejected"}`)
-		return err
-	}
-	accepted, err := g.market.Submit(r.Context(), order)
+	accepted, err := g.submit(r.Context(), order, leverage)
 	if err != nil {
-		// Release even if the client went away, or the hold would linger
-		// until reconciliation.
-		if relErr := g.ledger.Release(context.WithoutCancel(r.Context()), order.ID); relErr != nil {
-			g.log.Error("releasing hold for rejected order", "order_id", order.ID, "err", relErr)
-		}
-		g.metrics.inc(`t3_gateway_orders_total{result="rejected"}`)
 		return err
 	}
-	g.metrics.inc(`t3_gateway_orders_total{result="accepted"}`)
 	g.log.Info("order accepted", "order_id", accepted.ID, "user_id", u.ID, "symbol", accepted.Symbol,
 		"direction", accepted.Direction, "type", accepted.Type, "quantity", accepted.Quantity, "leverage", leverage)
 	writeJSON(w, http.StatusAccepted, orderResponse{Order: accepted, Leverage: leverage, Status: "accepted"})
 	return nil
+}
+
+// submit validates an order, reserves its funding and sends it to the engine.
+func (g *Gateway) submit(ctx context.Context, order engine.Order, leverage int64) (engine.Order, error) {
+	if err := order.Validate(); err != nil {
+		return engine.Order{}, err
+	}
+	if err := g.halted(); err != nil {
+		return engine.Order{}, err
+	}
+
+	// Funding is reserved before the engine sees the order, so a fill can
+	// never overdraw the account.
+	if err := g.ledger.ReserveLeveraged(ctx, order, leverage); err != nil {
+		g.metrics.inc(`t3_gateway_orders_total{result="rejected"}`)
+		return engine.Order{}, err
+	}
+	accepted, err := g.market.Submit(ctx, order)
+	if err != nil {
+		// Release even if the client went away, or the hold would linger
+		// until reconciliation.
+		if relErr := g.ledger.Release(context.WithoutCancel(ctx), order.ID); relErr != nil {
+			g.log.Error("releasing hold for rejected order", "order_id", order.ID, "err", relErr)
+		}
+		g.metrics.inc(`t3_gateway_orders_total{result="rejected"}`)
+		return engine.Order{}, err
+	}
+	g.metrics.inc(`t3_gateway_orders_total{result="accepted"}`)
+	return accepted, nil
 }
 
 func (g *Gateway) listSymbols(w http.ResponseWriter, _ *http.Request, _ *User) error {

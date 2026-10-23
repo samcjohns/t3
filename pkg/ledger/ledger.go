@@ -52,12 +52,15 @@ var (
 	ErrLoanLimit          = errors.New("loan over the lending pool's limit")
 	ErrAccountLiquidating = errors.New("account is being liquidated")
 	ErrAccountClosed      = errors.New("account is bankrupt and closed")
+	ErrAccountBlocked     = errors.New("account is blocked from trading")
 )
 
 // Account is a snapshot of one account's balances.
 type Account struct {
 	ID     string `json:"id"`
 	Status Status `json:"status"`
+	// Blocked accounts cannot place orders or lend; an admin blocked them.
+	Blocked bool `json:"blocked"`
 	// Cash is the total cash balance in minor units, including CashHeld.
 	Cash     int64 `json:"cash"`
 	CashHeld int64 `json:"cash_held"`
@@ -94,6 +97,7 @@ type OrderChecker interface {
 
 type account struct {
 	status             Status
+	blocked            bool
 	cash, cashHeld     int64
 	shares, sharesHeld map[string]int64
 	poolShares         int64
@@ -113,7 +117,7 @@ func (a *account) clone() *account {
 }
 
 func (a *account) snapshot(id string) Account {
-	out := Account{ID: id, Status: a.status, Cash: a.cash, CashHeld: a.cashHeld, Holdings: []Holding{}, PoolShares: a.poolShares, Loans: maps.Clone(a.loans)}
+	out := Account{ID: id, Status: a.status, Blocked: a.blocked, Cash: a.cash, CashHeld: a.cashHeld, Holdings: []Holding{}, PoolShares: a.poolShares, Loans: maps.Clone(a.loans)}
 	for _, sym := range slices.Sorted(maps.Keys(a.shares)) {
 		if a.shares[sym] > 0 {
 			out.Holdings = append(out.Holdings, Holding{Symbol: sym, Quantity: a.shares[sym], Held: a.sharesHeld[sym]})
@@ -205,6 +209,7 @@ func Open(ctx context.Context, cfg Config) (*Ledger, error) {
 	for _, a := range st.Accounts {
 		acc := newAccount()
 		acc.cash, acc.cashHeld, acc.poolShares, acc.loans = a.Cash, a.CashHeld, a.PoolShares, maps.Clone(a.Loans)
+		acc.blocked = a.Blocked
 		if a.Status != "" {
 			acc.status = a.Status
 		}

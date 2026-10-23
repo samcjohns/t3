@@ -386,3 +386,44 @@ func TestLoanLimits(t *testing.T) {
 		t.Fatalf("a buy without leverage is not limited: %v", err)
 	}
 }
+
+func TestBlockAndAdminLiquidation(t *testing.T) {
+	m := newMarket(t)
+	m.fund("sam", 10_000, 100)
+	m.fund("bea", 100_000, 0)
+
+	must(t, m.place(sell("gtc", "sam", 10, 5000)))
+	must(t, m.l.SetBlocked(ctx, "sam", true))
+	if err := m.place(sell("s1", "sam", 1, 1)); !errors.Is(err, ErrAccountBlocked) {
+		t.Fatalf("trading while blocked: %v", err)
+	}
+	if err := m.l.Lend(ctx, "sam", 1); !errors.Is(err, ErrAccountBlocked) {
+		t.Fatalf("lending while blocked: %v", err)
+	}
+	if liq := m.liquidate(); !reflect.DeepEqual(liq.Cancel, []string{"gtc"}) || liq.Sell != nil {
+		t.Fatalf("blocking = %+v, want the open order cancelled", liq)
+	}
+	m.tick()
+	if sam := m.account("sam"); !sam.Blocked || sam.Holdings[0].Held != 0 {
+		t.Fatalf("sam = %+v", sam)
+	}
+
+	// A forced sale of everything, while still blocked.
+	must(t, m.l.Liquidate(ctx, "sam"))
+	liq := m.liquidate()
+	if len(liq.Sell) != 1 || liq.Sell[0].Quantity != 100 {
+		t.Fatalf("liquidation = %+v", liq)
+	}
+	must(t, m.place(buy("b1", "bea", 100, 900)))
+	m.tick()
+	sam := m.account("sam")
+	if sam.Status != StatusActive || !sam.Blocked || len(sam.Holdings) != 0 || sam.Cash != 100_000 {
+		t.Fatalf("sam after liquidation = %+v", sam)
+	}
+
+	must(t, m.l.SetBlocked(ctx, "sam", false))
+	must(t, m.place(buy("b2", "sam", 1, 900)))
+	if err := m.l.Liquidate(ctx, "nobody"); !errors.Is(err, ErrUnknownAccount) {
+		t.Fatalf("liquidating an unknown account: %v", err)
+	}
+}
