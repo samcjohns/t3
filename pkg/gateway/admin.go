@@ -203,7 +203,7 @@ func (g *Gateway) claimNewsAlerts(w http.ResponseWriter, _ *http.Request, _ *Use
 	return nil
 }
 
-// price is a symbol's last clearing price, or its reference price if it has
+// price is a symbol's last clearing price, or its opening price if it has
 // never traded.
 func (g *Gateway) price(symbol string) int64 {
 	if q, err := g.reports.Quote(symbol); err == nil && q.LastPrice > 0 {
@@ -211,7 +211,7 @@ func (g *Gateway) price(symbol string) int64 {
 	}
 	for _, t := range g.cfg.Tickers {
 		if t.Symbol == symbol {
-			return t.ReferencePrice
+			return t.OpeningPrice
 		}
 	}
 	return 0

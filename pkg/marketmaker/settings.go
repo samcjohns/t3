@@ -104,13 +104,20 @@ func (s Setting) Valid(v float64) bool {
 	return !math.IsNaN(v) && v >= s.Min && v <= s.Max && (!s.Integer || v == math.Trunc(v))
 }
 
-func (l *Liquidity) params() []param {
+func (o *Opinion) params() []param {
 	return []param{
+		ticks("memory", "Reference memory", &o.Memory, 1, 1_000_000, "Half-life of how fast its own reference price follows the market price."),
+		float("drift", "Reference drift", "fraction", &o.Drift, 0, 0.01, "Size of its own reference price's random walk each tick."),
+	}
+}
+
+func (l *Liquidity) params() []param {
+	return append([]param{
 		cents("depth", "Depth per side", &l.Depth, 100, 100_000_000_000, "Total notional quoted on each side of each symbol."),
-		float("reversion", "Reversion", "fraction", &l.Reversion, 0, 1, "How far fair value moves towards the reference price each tick."),
+		float("reversion", "Reversion", "fraction", &l.Reversion, 0, 1, "How far fair value moves towards its own reference price each tick."),
 		float("max_skew", "Max inventory skew", "fraction", &l.MaxSkew, 0, 0.5, "The most fair value is skewed against excess or short inventory."),
 		float("max_lean", "Max lean", "fraction", &l.MaxLean, 0, 0.5, "The furthest fair value sits from the last price."),
-	}
+	}, l.Opinion.params()...)
 }
 
 func (f *Flow) params() []param {
@@ -123,7 +130,7 @@ func (f *Flow) params() []param {
 }
 
 func (m *Momentum) params() []param {
-	return []param{
+	return append([]param{
 		float("fast", "Fast average", "", &m.Fast, 0.001, 1, "Smoothing factor of the fast moving average, per tick."),
 		float("slow", "Slow average", "", &m.Slow, 0.001, 1, "Smoothing factor of the slow moving average, per tick."),
 		float("threshold", "Threshold", "fraction", &m.Threshold, 0, 0.5, "Smallest gap between the averages it trades on."),
@@ -131,12 +138,12 @@ func (m *Momentum) params() []param {
 		float("activity", "Activity", "fraction", &m.Activity, 0, 1, "Chance of trading a signalled symbol each tick."),
 		float("aggression", "Aggression", "fraction", &m.Aggression, 0, 0.5, "How far past the price it will trade."),
 		cents("notional", "Max order size", &m.Notional, 100, 10_000_000_000, "Largest order size."),
-		float("max_deviation", "Max deviation", "fraction", &m.MaxDeviation, 0, 1, "How far from its reference price it lets a trend carry a price."),
-	}
+		float("max_deviation", "Max deviation", "fraction", &m.MaxDeviation, 0, 1, "How far from its own reference price it lets a trend carry a price."),
+	}, m.Opinion.params()...)
 }
 
 func (n *News) params() []param {
-	return []param{
+	return append([]param{
 		float("rate", "News rate", "fraction", &n.Rate, 0, 1, "Chance of news per symbol per tick."),
 		float("min_impact", "Min impact", "fraction", &n.MinImpact, 0, 1, "Smallest move a story targets."),
 		float("max_impact", "Max impact", "fraction", &n.MaxImpact, 0, 1, "Largest move a story targets."),
@@ -144,6 +151,6 @@ func (n *News) params() []param {
 		ticks("max_ticks", "Max story length", &n.MaxTicks, 1, 1000, "Most ticks it trades on one story."),
 		float("aggression", "Aggression", "fraction", &n.Aggression, 0, 0.5, "How far past the price it will trade, never past the target."),
 		cents("notional", "Order size", &n.Notional, 100, 10_000_000_000, "Typical order size."),
-		float("max_deviation", "Max deviation", "fraction", &n.MaxDeviation, 0.001, 0.99, "Furthest from its reference price a story can target."),
-	}
+		float("max_deviation", "Max deviation", "fraction", &n.MaxDeviation, 0.001, 0.99, "Furthest from its own reference price a story can target."),
+	}, n.Opinion.params()...)
 }

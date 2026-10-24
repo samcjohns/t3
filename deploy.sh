@@ -19,6 +19,8 @@
 #   T3_PUBLIC_URL=https://t3.example.com          # the web app (edge mode)
 #   T3_PUBLIC_API_URL=https://t3-api.example.com  # the API (required in edge mode)
 #   T3_ALLOWED_ORIGINS=https://t3.example.com
+#   T3_FINNHUB_API_KEY=...  # link maker: stock links
+#   T3_FRED_API_KEY=...     # link maker: commodity links
 set -euo pipefail
 
 # Everything runs from main, at the bottom, so bash has read the whole script
@@ -31,7 +33,7 @@ main() {
 		case "$arg" in
 		--skip-pull) pull=false ;;
 		-h | --help)
-			sed -n '2,23p' "$0"
+			sed -n '2,25p' "$0"
 			exit 0
 			;;
 		*) die "unknown argument: $arg (try --help)" ;;

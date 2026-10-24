@@ -117,7 +117,7 @@ type AccountReader interface {
 type Price struct {
 	Symbol string `json:"symbol"`
 	Name   string `json:"name"`
-	// Price is the last clearing price, or the reference price if the
+	// Price is the last clearing price, or the opening price if the
 	// symbol has never traded.
 	Price int64 `json:"price"`
 	// PreviousClose is the last price of the previous UTC day.
@@ -202,7 +202,7 @@ func New(accounts AccountReader, cfg Config) *Service {
 		days:          make(map[string]*dayState),
 	}
 	for _, t := range cfg.Listing {
-		s.days[t.Symbol] = &dayState{price: t.ReferencePrice, previousClose: t.ReferencePrice}
+		s.days[t.Symbol] = &dayState{price: t.OpeningPrice, previousClose: t.OpeningPrice}
 	}
 	s.publishPrices(0, time.Time{})
 	return s

@@ -56,7 +56,7 @@ function Standings({ api, username, tick }: Props) {
 				<div>
 					<h1 class="panel-title">Leaderboard</h1>
 					<p class="board-sub">
-						Ranked by account value: cash plus holdings at last prices.
+						Ranked by account value: cash, plus holdings at last prices, plus money in the lending pool, less what is owed to it.
 						{board && ` Every trader starts with ${money(board.starting_cash)}.`}
 					</p>
 				</div>
@@ -90,6 +90,9 @@ function Standings({ api, username, tick }: Props) {
 								<th class="num rank-col">Rank</th>
 								<th>Trader</th>
 								<th class="num">Account value</th>
+								<th class="num" title="What the trader has lent to the lending pool, with interest earned. It counts towards account value.">
+									In pool
+								</th>
 								<th class="num">Return</th>
 							</tr>
 						</thead>
@@ -100,7 +103,7 @@ function Standings({ api, username, tick }: Props) {
 							{you && !youShown && (
 								<>
 									<tr class="gap" aria-hidden="true">
-										<td colSpan={4}>⋯</td>
+										<td colSpan={5}>⋯</td>
 									</tr>
 									<Row s={you} start={board.starting_cash} mine />
 								</>
@@ -196,6 +199,7 @@ function Row({ s, start, mine }: { s: Standing; start: number; mine: boolean }) 
 				{mine && <span class="you-tag">You</span>}
 			</td>
 			<td class="num">{money(s.total_value)}</td>
+			<td class={s.pool_value ? 'num' : 'num muted'}>{s.pool_value ? money(s.pool_value) : '—'}</td>
 			<td class={`num ${trendClass(s.gain)}`}>
 				{signedMoney(s.gain)}
 				<small class="sub">{percent(s.gain, start)}</small>

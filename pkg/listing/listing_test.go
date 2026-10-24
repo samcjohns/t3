@@ -18,11 +18,11 @@ func TestDefaultIsValid(t *testing.T) {
 func TestValidate(t *testing.T) {
 	bad := [][]Ticker{
 		nil,
-		{{Symbol: "acme", ReferencePrice: 1}},
-		{{Symbol: "TOOLONG", ReferencePrice: 1}},
-		{{Symbol: "A", ReferencePrice: 1}, {Symbol: "A", ReferencePrice: 1}},
-		{{Symbol: "A", ReferencePrice: 0}},
-		{{Symbol: "A", ReferencePrice: 1, MakerShares: -1}},
+		{{Symbol: "acme", OpeningPrice: 1}},
+		{{Symbol: "TOOLONG", OpeningPrice: 1}},
+		{{Symbol: "A", OpeningPrice: 1}, {Symbol: "A", OpeningPrice: 1}},
+		{{Symbol: "A", OpeningPrice: 0}},
+		{{Symbol: "A", OpeningPrice: 1, MakerShares: -1}},
 	}
 	for _, ts := range bad {
 		if Validate(ts) == nil {
@@ -33,9 +33,9 @@ func TestValidate(t *testing.T) {
 
 func TestLoad(t *testing.T) {
 	p := filepath.Join(t.TempDir(), "tickers.json")
-	os.WriteFile(p, []byte(`[{"symbol":"ABC","name":"ABC Co","reference_price":100,"maker_shares":5}]`), 0o600)
+	os.WriteFile(p, []byte(`[{"symbol":"ABC","name":"ABC Co","opening_price":100,"maker_shares":5}]`), 0o600)
 	ts, err := Load(p)
-	if err != nil || len(ts) != 1 || ts[0].ReferencePrice != 100 {
+	if err != nil || len(ts) != 1 || ts[0].OpeningPrice != 100 {
 		t.Fatalf("Load = %+v, %v", ts, err)
 	}
 	os.WriteFile(p, []byte(`{`), 0o600)

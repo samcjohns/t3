@@ -19,10 +19,9 @@ import (
 	"time"
 )
 
-// Ticker is a listed symbol and its reference price.
+// Ticker is a listed symbol.
 type Ticker struct {
-	Symbol         string `json:"symbol"`
-	ReferencePrice int64  `json:"reference_price"`
+	Symbol string `json:"symbol"`
 }
 
 // Price is one symbol's current price.
@@ -260,17 +259,50 @@ type Level struct {
 // all.
 var DefaultLevels = []Level{{0.0015, 1}, {0.003, 2}, {0.006, 3}, {0.012, 5}, {0.025, 9}}
 
+// Opinion is a maker's own reference price for each symbol, formed only from
+// the prices it has seen, as any player could. It starts at the first price
+// seen, then each tick follows the price with a half-life of Memory ticks and
+// wanders by a random Drift. Each maker has its own, so they disagree with
+// one another, and no reference stays put for long.
+type Opinion struct {
+	// Memory is the half-life, in ticks, of how fast the reference follows
+	// the price. Default 8640, a day of 10s ticks.
+	Memory int
+	// Drift is the standard deviation of the reference's own random walk
+	// each tick, as a fraction. Default 0.03%, about 3% a day.
+	Drift float64
+
+	rng *rand.Rand
+	ref map[string]float64
+}
+
+func newOpinion(rng *rand.Rand) Opinion {
+	return Opinion{Memory: 8640, Drift: 0.0003, rng: rng, ref: map[string]float64{}}
+}
+
+// update moves symbol's reference on by one tick at price and returns it.
+func (o *Opinion) update(symbol string, price int64) int64 {
+	ref, seen := o.ref[symbol]
+	if !seen {
+		ref = float64(price)
+	}
+	ref += (1 - math.Pow(0.5, 1/float64(max(1, o.Memory)))) * (float64(price) - ref)
+	ref *= math.Exp(o.Drift * o.rng.NormFloat64())
+	o.ref[symbol] = ref
+	return max(1, int64(math.Round(ref)))
+}
+
 // Liquidity quotes a ladder of bids and asks around each symbol's price. Its
-// fair value reverts towards the reference price, and it skews quotes against
-// its inventory so it never runs out of either side for long.
+// fair value reverts towards its own reference price, and it skews quotes
+// against its inventory so it never runs out of either side for long.
 type Liquidity struct {
-	Reference map[string]int64
+	Opinion
 	// Levels is the ladder quoted on each side. Default DefaultLevels.
 	Levels []Level
 	// Depth is the total notional quoted on each side of each symbol, in
 	// cents. Default $100,000.
 	Depth int64
-	// Reversion pulls fair value towards the reference each tick. Default 2%.
+	// Reversion pulls fair value towards its reference each tick. Default 2%.
 	Reversion float64
 	// MaxSkew is the largest inventory skew of fair value. Default 0.5%.
 	MaxSkew float64
@@ -282,13 +314,10 @@ type Liquidity struct {
 	target map[string]int64
 }
 
-func NewLiquidity(tickers []Ticker, seed uint64) *Liquidity {
-	l := &Liquidity{Reference: map[string]int64{}, Levels: DefaultLevels, Depth: 10_000_000,
-		Reversion: 0.02, MaxSkew: 0.005, MaxLean: 0.005, rng: rand.New(rand.NewPCG(seed, 1))}
-	for _, t := range tickers {
-		l.Reference[t.Symbol] = t.ReferencePrice
-	}
-	return l
+func NewLiquidity(seed uint64) *Liquidity {
+	rng := rand.New(rand.NewPCG(seed, 1))
+	return &Liquidity{Opinion: newOpinion(rng), Levels: DefaultLevels, Depth: 10_000_000,
+		Reversion: 0.02, MaxSkew: 0.005, MaxLean: 0.005, rng: rng}
 }
 
 func (l *Liquidity) Orders(snap Snapshot, acct Account) []Order {
@@ -303,10 +332,10 @@ func (l *Liquidity) Orders(snap Snapshot, acct Account) []Order {
 	}
 	var out []Order
 	for _, p := range snap.Prices {
-		ref, ok := l.Reference[p.Symbol]
-		if !ok || p.Price <= 0 {
+		if p.Price <= 0 {
 			continue
 		}
+		ref := l.update(p.Symbol, p.Price)
 		last := float64(p.Price)
 		fair := last + l.Reversion*(float64(ref)-last)
 		if target := l.target[p.Symbol]; target > 0 {
@@ -413,9 +442,9 @@ func cross(rng *rand.Rand, b *book, symbol string, price int64, buy bool, notion
 // of each symbol's price and trades in the direction of the gap between
 // them, sized by its strength, so moves that start tend to run for a while
 // before the liquidity maker's reversion wins. It stops chasing a trend once
-// the price is MaxDeviation from its reference.
+// the price is MaxDeviation from its own reference.
 type Momentum struct {
-	Reference map[string]int64
+	Opinion
 	// Fast and Slow are the moving averages' smoothing factors per tick.
 	// Default 0.3 and 0.05.
 	Fast, Slow float64
@@ -431,32 +460,29 @@ type Momentum struct {
 	Aggression float64
 	// Notional is the largest order size in cents. Default $5,000.
 	Notional int64
-	// MaxDeviation is how far from its reference it lets a trend carry a
-	// price. Default 10%.
+	// MaxDeviation is how far from its own reference it lets a trend carry
+	// a price. Default 10%.
 	MaxDeviation float64
 
 	rng        *rand.Rand
 	fast, slow map[string]float64
 }
 
-func NewMomentum(tickers []Ticker, seed uint64) *Momentum {
-	m := &Momentum{Reference: map[string]int64{}, Fast: 0.3, Slow: 0.05, Threshold: 0.001, Saturation: 0.01,
+func NewMomentum(seed uint64) *Momentum {
+	rng := rand.New(rand.NewPCG(seed, 3))
+	return &Momentum{Opinion: newOpinion(rng), Fast: 0.3, Slow: 0.05, Threshold: 0.001, Saturation: 0.01,
 		Activity: 0.7, Aggression: 0.004, Notional: 500_000, MaxDeviation: 0.1,
-		rng: rand.New(rand.NewPCG(seed, 3)), fast: map[string]float64{}, slow: map[string]float64{}}
-	for _, t := range tickers {
-		m.Reference[t.Symbol] = t.ReferencePrice
-	}
-	return m
+		rng: rng, fast: map[string]float64{}, slow: map[string]float64{}}
 }
 
 func (m *Momentum) Orders(snap Snapshot, acct Account) []Order {
 	b := available(acct)
 	var out []Order
 	for _, p := range snap.Prices {
-		ref, ok := m.Reference[p.Symbol]
-		if !ok || p.Price <= 0 {
+		if p.Price <= 0 {
 			continue
 		}
+		ref := m.update(p.Symbol, p.Price)
 		price := float64(p.Price)
 		fast, seen := m.fast[p.Symbol]
 		if !seen {
@@ -486,12 +512,13 @@ func (m *Momentum) Orders(snap Snapshot, acct Account) []Order {
 // News trades on imaginary headlines. Now and then a symbol gets news that
 // sets a target a few percent away, and it trades hard towards the target
 // for a few ticks, giving the price a sudden jump the other makers then
-// absorb. News is more likely to push a price back towards its reference
-// than further away, and never sets a target beyond MaxDeviation from it.
+// absorb. News is more likely to push a price back towards its own
+// reference than further away, and never sets a target beyond MaxDeviation
+// from it.
 // Each headline is published as an Article. Admin news (see Alert) is a
 // single market buy, unbounded by MaxDeviation.
 type News struct {
-	Reference map[string]int64
+	Opinion
 	// Rate is the chance of news per symbol per tick. Default 1%.
 	Rate float64
 	// MinImpact and MaxImpact bound the size of a target move. Default 2% and 8%.
@@ -505,7 +532,7 @@ type News struct {
 	Aggression float64
 	// Notional is the typical order size in cents. Default $20,000.
 	Notional int64
-	// MaxDeviation is the furthest from its reference a target can be.
+	// MaxDeviation is the furthest from its own reference a target can be.
 	// Default 20%.
 	MaxDeviation float64
 	// Write turns a new story into an article. Default PlainHeadline.
@@ -522,24 +549,21 @@ type story struct {
 	ticks  int
 }
 
-func NewNews(tickers []Ticker, seed uint64) *News {
-	n := &News{Reference: map[string]int64{}, Rate: 0.01, MinImpact: 0.02, MaxImpact: 0.08,
+func NewNews(seed uint64) *News {
+	rng := rand.New(rand.NewPCG(seed, 4))
+	return &News{Opinion: newOpinion(rng), Rate: 0.01, MinImpact: 0.02, MaxImpact: 0.08,
 		MinTicks: 3, MaxTicks: 10, Aggression: 0.006, Notional: 2_000_000, MaxDeviation: 0.2,
-		Write: PlainHeadline, rng: rand.New(rand.NewPCG(seed, 4)), stories: map[string]story{}}
-	for _, t := range tickers {
-		n.Reference[t.Symbol] = t.ReferencePrice
-	}
-	return n
+		Write: PlainHeadline, rng: rng, stories: map[string]story{}}
 }
 
 func (n *News) Orders(snap Snapshot, acct Account) []Order {
 	b := available(acct)
 	out := n.alertOrders(snap, &b)
 	for _, p := range snap.Prices {
-		ref, ok := n.Reference[p.Symbol]
-		if !ok || p.Price <= 0 {
+		if p.Price <= 0 {
 			continue
 		}
+		ref := n.update(p.Symbol, p.Price)
 		s, active := n.stories[p.Symbol]
 		if !active {
 			if n.rng.Float64() >= n.Rate {
@@ -612,7 +636,7 @@ func PlainHeadline(symbol string, price, target int64) Article {
 }
 
 // headline draws a new story for a symbol. Good news is likelier the further
-// the price is below its reference.
+// the price is below its own reference.
 func (n *News) headline(price, ref int64) story {
 	dev := math.Max(-1, math.Min(1, deviation(price, ref)/n.MaxDeviation))
 	impact := n.MinImpact + (n.MaxImpact-n.MinImpact)*n.rng.Float64()

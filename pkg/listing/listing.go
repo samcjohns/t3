@@ -12,9 +12,8 @@ import (
 type Ticker struct {
 	Symbol string `json:"symbol"`
 	Name   string `json:"name"`
-	// ReferencePrice is the opening price in cents, used before the symbol
-	// has traded and as the anchor market makers revert towards.
-	ReferencePrice int64 `json:"reference_price"`
+	// OpeningPrice is the price in cents before the symbol has first traded.
+	OpeningPrice int64 `json:"opening_price"`
 	// MakerShares is how many shares each market maker is seeded with.
 	MakerShares int64 `json:"maker_shares"`
 }
@@ -62,8 +61,8 @@ func Validate(ts []Ticker) error {
 			return fmt.Errorf("symbol %q must be 1-5 uppercase letters", t.Symbol)
 		case seen[t.Symbol]:
 			return fmt.Errorf("symbol %q listed twice", t.Symbol)
-		case t.ReferencePrice <= 0:
-			return fmt.Errorf("%s: reference_price must be positive", t.Symbol)
+		case t.OpeningPrice <= 0:
+			return fmt.Errorf("%s: opening_price must be positive", t.Symbol)
 		case t.MakerShares < 0:
 			return fmt.Errorf("%s: maker_shares must not be negative", t.Symbol)
 		}

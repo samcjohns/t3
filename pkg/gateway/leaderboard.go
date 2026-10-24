@@ -20,8 +20,11 @@ type Standing struct {
 	Username   string `json:"username"`
 	TotalValue int64  `json:"total_value"`
 	// Gain is TotalValue less the starting cash every trader receives.
-	Gain   int64 `json:"gain"`
-	userID string
+	Gain int64 `json:"gain"`
+	// PoolValue is what the trader's stake in the lending pool is worth,
+	// which TotalValue includes.
+	PoolValue int64 `json:"pool_value"`
+	userID    string
 }
 
 // leaderboard caches the ranked standings for one engine tick, since values
@@ -59,7 +62,8 @@ func (g *Gateway) standings(ctx context.Context) (tick uint64, _ []Standing, err
 		if p.Status == ledger.StatusBankrupt {
 			continue // ranked under bankruptcies instead
 		}
-		out = append(out, Standing{Username: u.Username, TotalValue: p.TotalValue, Gain: p.TotalValue - g.cfg.StartingCash, userID: u.ID})
+		out = append(out, Standing{Username: u.Username, TotalValue: p.TotalValue, Gain: p.TotalValue - g.cfg.StartingCash,
+			PoolValue: p.PoolValue, userID: u.ID})
 	}
 	slices.SortFunc(out, func(a, b Standing) int {
 		return cmp.Or(cmp.Compare(b.TotalValue, a.TotalValue), strings.Compare(a.Username, b.Username))

@@ -222,6 +222,39 @@ func TestMarketBuyHoldReleasedOnFullFill(t *testing.T) {
 	m.want("alice", 40_000, 0, 10, 0)
 }
 
+func TestOpenOrdersAndCancel(t *testing.T) {
+	m := newMarket(t)
+	m.fund("alice", 100_000, 0)
+	m.fund("bob", 0, 30)
+
+	if _, err := m.l.OpenOrders("nobody"); !errors.Is(err, ErrUnknownAccount) {
+		t.Errorf("unknown account: %v", err)
+	}
+	must(t, m.place(buy("b1", "alice", 20, 1010)))
+	must(t, m.place(buy("b2", "alice", 5, 500)))
+	must(t, m.place(sell("s1", "bob", 10, 1000)))
+	m.tick() // b1 fills 10 @ 1005; b2 rests below the market
+
+	open, err := m.l.OpenOrders("alice")
+	must(t, err)
+	if len(open) != 2 || open[0].Order.ID != "b1" || open[0].Order.Quantity != 20 || open[0].Remaining != 10 || open[0].Cash != 10_100 ||
+		open[1].Order.ID != "b2" || open[1].Remaining != 5 || open[1].Cash != 2_500 {
+		t.Fatalf("open orders = %+v", open)
+	}
+	if open, _ := m.l.OpenOrders("bob"); len(open) != 0 {
+		t.Fatalf("bob's open orders = %+v", open)
+	}
+
+	// Cancelling releases the hold once the auction reports the order expired.
+	m.eng.Cancel("b2")
+	m.want("alice", 89_950, 12_600, 10, 0)
+	m.tick()
+	m.want("alice", 89_950, 10_100, 10, 0)
+	if open, _ := m.l.OpenOrders("alice"); len(open) != 1 || open[0].Order.ID != "b1" {
+		t.Fatalf("after cancel = %+v", open)
+	}
+}
+
 func TestTickOrdering(t *testing.T) {
 	l := New()
 	if err := l.ApplyTick(ctx, engine.TickResult{Tick: 2}); !errors.Is(err, ErrTickOutOfOrder) {

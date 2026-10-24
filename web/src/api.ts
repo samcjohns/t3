@@ -29,7 +29,7 @@ export interface Session {
 export interface Price {
 	symbol: string;
 	name: string;
-	/** Last clearing price, or the reference price if it has never traded. */
+	/** Last clearing price, or the opening price if it has never traded. */
 	price: number;
 	previous_close: number;
 	change: number;
@@ -120,6 +120,8 @@ export interface Standing {
 	total_value: number;
 	/** total_value less the starting cash. */
 	gain: number;
+	/** What the trader's stake in the lending pool is worth, which total_value includes. */
+	pool_value: number;
 }
 
 export interface Leaderboard {
@@ -279,6 +281,28 @@ export interface Order extends Required<OrderRequest> {
 	status: 'accepted';
 }
 
+/** One of your orders that hasn't filled or expired yet. */
+export interface OpenOrder {
+	id: string;
+	symbol: string;
+	direction: Direction;
+	type: OrderType;
+	/** Set on limit orders. */
+	time_in_force?: TimeInForce;
+	/** What was ordered; `remaining` is what is still unfilled. */
+	quantity: number;
+	remaining: number;
+	limit_price: number;
+	max_cost: number;
+	leverage: number;
+	/** What the order still sets aside, which cancelling frees. */
+	cash_held: number;
+	shares_held: number;
+	created_at: string;
+	/** "cancelling" once you've asked to cancel it, until the next auction removes it. */
+	status: 'open' | 'cancelling';
+}
+
 export class ApiError extends Error {
 	constructor(
 		readonly status: number,
@@ -395,6 +419,13 @@ export class Api {
 	}
 	placeOrder(order: OrderRequest) {
 		return this.request<Order>('POST', '/v1/orders', order);
+	}
+	async openOrders() {
+		return (await this.request<{ orders: OpenOrder[] }>('GET', '/v1/orders')).orders;
+	}
+	/** Removes an open order at the next auction, freeing what it holds. Any part that fills in that auction first still counts. */
+	cancelOrder(id: string) {
+		return this.request<OpenOrder>('DELETE', `/v1/orders/${encodeURIComponent(id)}`);
 	}
 
 	async adminUsers() {

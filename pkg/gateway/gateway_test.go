@@ -160,7 +160,7 @@ func (e *env) tick() {
 func tickers(symbols ...string) []listing.Ticker {
 	var out []listing.Ticker
 	for i, s := range symbols {
-		out = append(out, listing.Ticker{Symbol: s, Name: s + " Corp", ReferencePrice: int64(1000 * (i + 1))})
+		out = append(out, listing.Ticker{Symbol: s, Name: s + " Corp", OpeningPrice: int64(1000 * (i + 1))})
 	}
 	return out
 }
@@ -342,11 +342,80 @@ func TestOrderValidation(t *testing.T) {
 	}
 }
 
+func TestOpenOrdersAndCancel(t *testing.T) {
+	e := newEnv(t, nil)
+	admin := e.admin()
+	alice, _ := e.trader("alice")
+	bob, bobID := e.trader("bob")
+	e.expect(e.do("POST", "/v1/admin/accounts/"+bobID+"/shares", admin, map[string]any{"symbol": "ACME", "quantity": 5}), http.StatusOK)
+
+	e.expect(e.do("GET", "/v1/orders", "", nil), http.StatusUnauthorized)
+	if r := e.expect(e.do("GET", "/v1/orders", alice, nil), http.StatusOK); len(r.body["orders"].([]any)) != 0 {
+		t.Fatalf("orders before trading = %v", r.body)
+	}
+
+	// A buy far below the market rests, holding cash it will never use.
+	low := e.expect(e.do("POST", "/v1/orders", alice, map[string]any{
+		"symbol": "ACME", "direction": "BUY", "type": "LIMIT", "quantity": 10, "limit_price": 500,
+	}), http.StatusAccepted).body["id"].(string)
+	e.expect(e.do("POST", "/v1/orders", bob, map[string]any{
+		"symbol": "ACME", "direction": "SELL", "type": "LIMIT", "quantity": 5, "limit_price": 2000,
+	}), http.StatusAccepted)
+	e.tick()
+
+	orders := e.expect(e.do("GET", "/v1/orders", alice, nil), http.StatusOK).body["orders"].([]any)
+	if len(orders) != 1 {
+		t.Fatalf("alice's orders = %v", orders)
+	}
+	o := orders[0].(map[string]any)
+	if o["id"] != low || o["status"] != "open" || o["time_in_force"] != "GTC" || num(o["remaining"]) != 10 ||
+		num(o["cash_held"]) != 5_000 || num(o["leverage"]) != 1 {
+		t.Fatalf("open order = %v", o)
+	}
+
+	// Nobody can cancel someone else's order, or tell that it exists.
+	if r := e.do("DELETE", "/v1/orders/"+low, bob, nil); r.status != http.StatusNotFound || r.errorCode() != "unknown_order" {
+		t.Fatalf("bob cancelling alice's order = %d %v", r.status, r.body)
+	}
+	e.expect(e.do("DELETE", "/v1/orders/ord_nope", alice, nil), http.StatusNotFound)
+
+	r := e.expect(e.do("DELETE", "/v1/orders/"+low, alice, nil), http.StatusAccepted)
+	if r.body["id"] != low || r.body["status"] != "cancelling" {
+		t.Fatalf("cancel response = %v", r.body)
+	}
+	e.expect(e.do("DELETE", "/v1/orders/"+low, alice, nil), http.StatusAccepted) // repeating is harmless
+	orders = e.expect(e.do("GET", "/v1/orders", alice, nil), http.StatusOK).body["orders"].([]any)
+	if len(orders) != 1 || orders[0].(map[string]any)["status"] != "cancelling" {
+		t.Fatalf("orders while cancelling = %v", orders)
+	}
+	if acct := e.expect(e.do("GET", "/v1/account", alice, nil), http.StatusOK); num(acct.body["cash_held"]) != 5_000 {
+		t.Fatalf("hold released before the auction: %v", acct.body)
+	}
+
+	e.tick()
+	if r := e.expect(e.do("GET", "/v1/orders", alice, nil), http.StatusOK); len(r.body["orders"].([]any)) != 0 {
+		t.Fatalf("orders after cancel = %v", r.body)
+	}
+	if acct := e.expect(e.do("GET", "/v1/account", alice, nil), http.StatusOK); num(acct.body["cash_held"]) != 0 {
+		t.Fatalf("hold after cancel = %v", acct.body)
+	}
+	e.expect(e.do("DELETE", "/v1/orders/"+low, alice, nil), http.StatusNotFound)
+
+	// Liquidation cancels orders itself, and its sells can't be cancelled.
+	bobsSell := e.expect(e.do("GET", "/v1/orders", bob, nil), http.StatusOK).body["orders"].([]any)[0].(map[string]any)["id"].(string)
+	e.expect(e.do("POST", "/v1/admin/accounts/"+bobID+"/liquidate", admin, nil), http.StatusOK)
+	if r := e.do("DELETE", "/v1/orders/"+bobsSell, bob, nil); r.status != http.StatusConflict || r.errorCode() != "account_liquidating" {
+		t.Fatalf("cancel while liquidating = %d %v", r.status, r.body)
+	}
+}
+
 type failingMarket struct{}
 
 func (failingMarket) Submit(context.Context, engine.Order) (engine.Order, error) {
 	return engine.Order{}, errors.New("engine unavailable")
 }
+
+func (failingMarket) Cancel(string) {}
 
 func (failingMarket) LastTick() uint64 { return 0 }
 
@@ -366,6 +435,21 @@ func TestEngineRejectionReleasesHold(t *testing.T) {
 	}
 	if a, _ := l.Account(id); a.CashHeld != 0 {
 		t.Fatalf("hold not released: %+v", a)
+	}
+}
+
+// TestSymbolsListNoPrice checks the listing names symbols without any price,
+// so neither players nor makers learn an anchor to trade against.
+func TestSymbolsListNoPrice(t *testing.T) {
+	e := newEnv(t, nil)
+	symbols := e.expect(e.do("GET", "/v1/market/symbols", "", nil), http.StatusOK).body["symbols"].([]any)
+	if len(symbols) == 0 {
+		t.Fatal("no symbols")
+	}
+	for _, s := range symbols {
+		if m := s.(map[string]any); len(m) != 2 || m["symbol"] == nil || m["name"] == nil {
+			t.Fatalf("symbol %v, want only symbol and name", m)
+		}
 	}
 }
 
@@ -594,10 +678,12 @@ func TestLeaderboard(t *testing.T) {
 	}
 
 	// Alice sells 10 deposited ACME to bob at 1500: she ends 15,000 up, bob
-	// holds shares worth what he paid, and carol ties with him.
+	// holds shares worth what he paid, and carol, who lent part of her cash
+	// to the pool, ties with him.
 	e.expect(e.do("POST", "/v1/admin/accounts/"+aliceID+"/shares", root, map[string]any{"symbol": "ACME", "quantity": 10}), http.StatusOK)
 	e.expect(e.do("POST", "/v1/orders", alice, map[string]any{"symbol": "ACME", "direction": "SELL", "type": "LIMIT", "quantity": 10, "limit_price": 1500}), http.StatusAccepted)
 	e.expect(e.do("POST", "/v1/orders", bob, map[string]any{"symbol": "ACME", "direction": "BUY", "type": "LIMIT", "quantity": 10, "limit_price": 1500}), http.StatusAccepted)
+	e.expect(e.do("POST", "/v1/pool/lend", carol, map[string]int64{"amount": 30_000}), http.StatusOK)
 	e.tick()
 
 	lb := e.expect(e.do("GET", "/v1/leaderboard", "", nil), http.StatusOK).body
@@ -607,9 +693,9 @@ func TestLeaderboard(t *testing.T) {
 	var got []string
 	for _, s := range lb["standings"].([]any) {
 		m := s.(map[string]any)
-		got = append(got, fmt.Sprintf("%v %s %v %v", m["rank"], m["username"], m["total_value"], m["gain"]))
+		got = append(got, fmt.Sprintf("%v %s %v %v %v", m["rank"], m["username"], m["total_value"], m["gain"], m["pool_value"]))
 	}
-	want := []string{"1 alice 115000 15000", "2 bob 100000 0", "2 carol 100000 0"}
+	want := []string{"1 alice 115000 15000 0", "2 bob 100000 0 0", "2 carol 100000 0 30000"}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("standings = %q, want %q", got, want)
 	}
@@ -756,7 +842,7 @@ func TestAdminNews(t *testing.T) {
 		e.expect(e.do("POST", "/v1/admin/news", admin, bad), http.StatusBadRequest)
 	}
 
-	// ACME has never traded, so the article has its reference price.
+	// ACME has never traded, so the article has its opening price.
 	a := e.expect(e.do("POST", "/v1/admin/news", admin, story), http.StatusCreated).body
 	if num(a["price"]) != 1000 || num(a["target"]) != 0 || a["headline"] != "ACME recalls every anvil" {
 		t.Fatalf("article = %v", a)

@@ -110,6 +110,26 @@ services:
       T3_MM_PASSWORD: ${T3_MARKET_MAKER_PASSWORD:-maker-dev-password}
       T3_MM_STRATEGY: news
 
+  # The link maker. Its mapping file is secret: copy it to ./links/links.json
+  # by hand (readable by uid 65532), never into git. Without one it idles.
+  mm-anchor:
+    container_name: t3-mm-anchor
+    image: t3-marketmaker
+    build: { context: ., target: marketmaker }
+    entrypoint: ["/linkbot"]
+    depends_on:
+      server: { condition: service_healthy }
+    restart: unless-stopped
+    volumes:
+      - ./links:/etc/t3/links:ro
+      - link:/var/lib/t3/link
+    environment:
+      T3_API_URL: http://server:8080
+      T3_MM_USERNAME: mm-anchor
+      T3_MM_PASSWORD: ${T3_MARKET_MAKER_PASSWORD:-maker-dev-password}
+      T3_FINNHUB_API_KEY: ${T3_FINNHUB_API_KEY:-}
+      T3_FRED_API_KEY: ${T3_FRED_API_KEY:-}
+
   web:
     container_name: t3-web
     image: t3-web
@@ -131,3 +151,5 @@ volumes:
     name: t3-pgdata
   archive:
     name: t3-archive
+  link:
+    name: t3-link

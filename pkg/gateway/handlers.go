@@ -238,13 +238,12 @@ func (g *Gateway) submit(ctx context.Context, order engine.Order, leverage int64
 
 func (g *Gateway) listSymbols(w http.ResponseWriter, _ *http.Request, _ *User) error {
 	type symbol struct {
-		Symbol         string `json:"symbol"`
-		Name           string `json:"name"`
-		ReferencePrice int64  `json:"reference_price"`
+		Symbol string `json:"symbol"`
+		Name   string `json:"name"`
 	}
 	out := make([]symbol, len(g.cfg.Tickers))
 	for i, t := range g.cfg.Tickers {
-		out[i] = symbol{t.Symbol, t.Name, t.ReferencePrice}
+		out[i] = symbol{t.Symbol, t.Name}
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"symbols": out})
 	return nil

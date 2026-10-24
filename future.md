@@ -10,7 +10,6 @@ Leverage and the lending pool are built (see [docs/api.md](docs/api.md#leverage)
 - **Empty pool:** nobody can borrow until players lend, so leverage is unavailable at launch. Decide whether that is acceptable or whether early lenders get a bonus rate.
 - **Per-symbol leverage limits:** thinly traded symbols should get a lower maximum ratio, so one liquidation can't crash the price and set off others.
 - **Short selling:** the pool lends cash only. Shorting needs a separate pool that lends shares.
-- **Cancelling orders:** the engine can now cancel orders, but only liquidation uses it. Traders could cancel their own GTC orders the same way.
 
 ## Leaderboard: Biggest Winners and Biggest Losers
 

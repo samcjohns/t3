@@ -31,6 +31,9 @@ import (
 // Market is the market engine port.
 type Market interface {
 	Submit(ctx context.Context, o engine.Order) (engine.Order, error)
+	// Cancel removes a pending or resting order at the next tick. Unknown
+	// and finished orders are ignored.
+	Cancel(id string)
 	LastTick() uint64
 }
 
@@ -43,6 +46,7 @@ type Ledger interface {
 	ReserveLeveraged(ctx context.Context, o engine.Order, ratio int64) error
 	Release(ctx context.Context, orderID string) error
 	Account(id string) (ledger.Account, error)
+	OpenOrders(accountID string) ([]ledger.HoldState, error)
 	LastTick() uint64
 	Lend(ctx context.Context, accountID string, amount int64) error
 	Redeem(ctx context.Context, accountID string, amount int64) (int64, error)
@@ -113,6 +117,7 @@ type Gateway struct {
 	board   leaderboard
 	alerts  newsAlerts
 	makers  makerReports
+	cancels cancellations
 }
 
 func New(market Market, ldg Ledger, reports Reports, cfg Config) *Gateway {
@@ -205,7 +210,9 @@ func (g *Gateway) routes() {
 	g.handle("GET /v1/account/portfolio", trader, g.getPortfolio)
 	g.handle("GET /v1/account/trades", trader, g.getAccountTrades)
 	g.handle("GET /v1/account/history", trader, g.getAccountHistory)
+	g.handle("GET /v1/orders", trader, g.listOrders)
 	g.handle("POST /v1/orders", trader, g.placeOrder)
+	g.handle("DELETE /v1/orders/{id}", trader, g.cancelOrder)
 
 	g.handle("GET /v1/leaderboard", public, g.getLeaderboard)
 	g.handle("GET /v1/leaderboard/bankruptcies", public, g.getBankruptcies)

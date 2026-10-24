@@ -1,0 +1,19 @@
+{
+  "settings": {
+    "fetch_at": "22:00",
+    "depth": 30000000,
+    "band": 0.03,
+    "max_lean": 0.005,
+    "max_daily_move": 0.15
+  },
+  "links": [
+    { "symbol": "BYTE", "source": "stock", "ticker": "MSFT", "half_life_days": 5 },
+    { "symbol": "GLXY", "source": "crypto", "pair": "ETH-USD", "sensitivity": 0.5, "half_life_days": 3 },
+    { "symbol": "EMBR", "source": "commodity", "series": "DCOILWTICO", "half_life_days": 4 },
+    { "symbol": "FATH", "source": "commodity", "series": "PCOPPUSDM", "half_life_days": 10 },
+    {
+      "symbol": "ZEPH", "source": "weather", "latitude": 47.61, "longitude": -122.33,
+      "variable": "temperature_2m_mean", "mode": "linear", "sensitivity": 0.01, "half_life_days": 2
+    }
+  ]
+}

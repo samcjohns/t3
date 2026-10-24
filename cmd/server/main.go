@@ -39,6 +39,9 @@ type config struct {
 	makers        []string
 	makerPassword string
 	makerCash     int64
+	// ownCash is the cash seeded to makers listed as name=cents, in place
+	// of makerCash.
+	ownCash       map[string]int64
 	proxies       []netip.Prefix
 	startingCash  int64
 	origins       []string
@@ -61,7 +64,7 @@ type config struct {
 func loadConfig() (config, error) {
 	c := config{
 		addr:          env("T3_ADDR", ":8080"),
-		makers:        split(env("T3_MARKET_MAKERS", "mm-liquidity,mm-flow,mm-momentum,mm-news")),
+		ownCash:       map[string]int64{},
 		makerPassword: os.Getenv("T3_MARKET_MAKER_PASSWORD"),
 		origins:       split(os.Getenv("T3_ALLOWED_ORIGINS")),
 		adminUsername: env("T3_ADMIN_USERNAME", "admin"),
@@ -95,6 +98,18 @@ func loadConfig() (config, error) {
 	}
 	if c.makerCash, err = strconv.ParseInt(env("T3_MARKET_MAKER_CASH", "500000000"), 10, 64); err != nil || c.makerCash < 0 {
 		return c, fmt.Errorf("T3_MARKET_MAKER_CASH must be a non-negative integer of cents")
+	}
+	// The link maker gets five times the others' cash to hold its walls.
+	for _, m := range split(env("T3_MARKET_MAKERS", "mm-liquidity,mm-flow,mm-momentum,mm-news,mm-anchor=2500000000")) {
+		name, cash, own := strings.Cut(m, "=")
+		if own {
+			n, err := strconv.ParseInt(cash, 10, 64)
+			if err != nil || n < 0 {
+				return c, fmt.Errorf("T3_MARKET_MAKERS: %s's cash must be a non-negative integer of cents", name)
+			}
+			c.ownCash[name] = n
+		}
+		c.makers = append(c.makers, name)
 	}
 	for _, cidr := range split(os.Getenv("T3_TRUSTED_PROXIES")) {
 		p, err := netip.ParsePrefix(cidr)
@@ -160,7 +175,7 @@ func run() error {
 	// ledger and reporting service rebuild from.
 	prices := map[string]int64{}
 	for _, t := range cfg.tickers {
-		prices[t.Symbol] = t.ReferencePrice
+		prices[t.Symbol] = t.OpeningPrice
 	}
 	ldg, err := ledger.Open(ctx, ledger.Config{Store: stores.ledger, Prices: prices, Leverage: ledger.Leverage{
 		DailyRate:     cfg.lendingRate,
@@ -312,8 +327,12 @@ func bootstrapMakers(ctx context.Context, cfg config, gw *gateway.Gateway, ldg *
 		if err != nil {
 			return fmt.Errorf("creating market maker %s: %w", name, err)
 		}
-		if cfg.makerCash > 0 {
-			if err := ldg.Deposit(ctx, u.ID, cfg.makerCash, "seed-cash"); err != nil {
+		cash, own := cfg.ownCash[name]
+		if !own {
+			cash = cfg.makerCash
+		}
+		if cash > 0 {
+			if err := ldg.Deposit(ctx, u.ID, cash, "seed-cash"); err != nil {
 				return fmt.Errorf("seeding %s: %w", name, err)
 			}
 		}

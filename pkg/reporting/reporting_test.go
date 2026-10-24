@@ -307,7 +307,7 @@ func TestReplay(t *testing.T) {
 }
 
 func TestPriceSnapshot(t *testing.T) {
-	tickers := []listing.Ticker{{Symbol: "ACME", Name: "Acme", ReferencePrice: 1000}, {Symbol: "ZED", Name: "Zed", ReferencePrice: 500}}
+	tickers := []listing.Ticker{{Symbol: "ACME", Name: "Acme", OpeningPrice: 1000}, {Symbol: "ZED", Name: "Zed", OpeningPrice: 500}}
 	s := New(nil, Config{Listing: tickers, Heartbeat: 10 * time.Second})
 	decode := func() PriceSnapshot {
 		var p PriceSnapshot

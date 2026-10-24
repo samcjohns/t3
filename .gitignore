@@ -1,2 +1,5 @@
 .env
 *.pem
+# The link maker's mappings are secret; see links.example.json.
+links/
+links.json

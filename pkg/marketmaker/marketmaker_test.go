@@ -21,19 +21,19 @@ import (
 var ctx = context.Background()
 
 func TestLiquidityQuotesWithinFunds(t *testing.T) {
-	l := NewLiquidity([]Ticker{{"ACME", 1000}, {"ZED", 500}}, 1)
+	l := NewLiquidity(1)
 	acct := Account{Cash: 100_000, Holdings: []struct {
 		Symbol   string `json:"symbol"`
 		Quantity int64  `json:"quantity"`
 		Held     int64  `json:"held"`
 	}{{"ACME", 3, 0}}}
-	snap := Snapshot{Prices: []Price{{"ACME", 1000}, {"ZED", 500}, {"UNLISTED", 10}}}
+	snap := Snapshot{Prices: []Price{{"ACME", 1000}, {"ZED", 500}}}
 
 	var spent int64
 	bids := map[string]int64{}
 	sold := map[string]int64{}
 	for _, o := range l.Orders(snap, acct) {
-		if o.TimeInForce != "IOC" || o.Symbol == "UNLISTED" {
+		if o.TimeInForce != "IOC" {
 			t.Fatalf("bad order %+v", o)
 		}
 		if o.Direction == "BUY" {
@@ -66,9 +66,49 @@ func TestFlowRespectsFunds(t *testing.T) {
 
 var makers = []string{"mm-liquidity", "mm-flow", "mm-momentum", "mm-news"}
 
+// fixed pins o's references at refs, so tests can reason about a known value.
+func fixed(o *Opinion, refs map[string]float64) {
+	o.Memory, o.Drift = 1<<30, 0
+	for sym, ref := range refs {
+		o.ref[sym] = ref
+	}
+}
+
+// TestOpinionsFormAndDrift checks a maker's reference starts at the first
+// price it sees, follows the price, and wanders on its own, differently for
+// each maker.
+func TestOpinionsFormAndDrift(t *testing.T) {
+	a, b := NewLiquidity(1).Opinion, NewLiquidity(2).Opinion
+	if ref := a.update("ACME", 1000); math.Abs(float64(ref-1000)) > 1 {
+		t.Fatalf("first reference %d, want about 1000", ref)
+	}
+	b.update("ACME", 1000)
+
+	// Half the gap to a new price closes in Memory ticks.
+	a.Drift = 0
+	var ref int64
+	for range a.Memory {
+		ref = a.update("ACME", 2000)
+	}
+	if ref < 1450 || ref > 1550 {
+		t.Fatalf("reference %d after one half-life towards 2000, want about 1500", ref)
+	}
+
+	// With the price held still, two makers' references drift apart.
+	a.Drift, a.ref["ACME"] = b.Drift, 1000
+	var ra, rb int64
+	for range 2000 {
+		ra, rb = a.update("ACME", 1000), b.update("ACME", 1000)
+	}
+	if ra == rb || ra == 1000 && rb == 1000 {
+		t.Fatalf("references %d and %d never drifted", ra, rb)
+	}
+}
+
 func TestMomentumFollowsTheTrend(t *testing.T) {
-	m := NewMomentum([]Ticker{{"ACME", 1000}}, 1)
+	m := NewMomentum(1)
 	m.Activity, m.MaxDeviation = 1, 0.2
+	fixed(&m.Opinion, map[string]float64{"ACME": 1000})
 	acct := Account{Cash: 10_000_000, Holdings: []struct {
 		Symbol   string `json:"symbol"`
 		Quantity int64  `json:"quantity"`
@@ -110,8 +150,9 @@ func TestMomentumFollowsTheTrend(t *testing.T) {
 }
 
 func TestNewsTargetsStayBounded(t *testing.T) {
-	n := NewNews([]Ticker{{"ACME", 1000}}, 1)
+	n := NewNews(1)
 	n.Rate, n.MaxDeviation = 1, 0.3
+	fixed(&n.Opinion, map[string]float64{"ACME": 1000})
 	acct := Account{Cash: 1_000_000_000, Holdings: []struct {
 		Symbol   string `json:"symbol"`
 		Quantity int64  `json:"quantity"`
@@ -153,7 +194,7 @@ func TestNewsTargetsStayBounded(t *testing.T) {
 // TestNewsAlert checks admin news becomes one market buy, capped by cash,
 // without writing an article of its own.
 func TestNewsAlert(t *testing.T) {
-	n := NewNews([]Ticker{{"ACME", 1000}}, 1)
+	n := NewNews(1)
 	n.Rate = 0
 	n.Alert([]NewsAlert{{"ACME", 500}, {"NOPE", 10}})
 	orders := n.Orders(Snapshot{Prices: []Price{{"ACME", 1000}}}, Account{Cash: 1_000_000_000})
@@ -192,11 +233,7 @@ func TestPlainHeadline(t *testing.T) {
 func TestNewsPublishesHeadlines(t *testing.T) {
 	x := newExchange(t)
 	c := NewHTTPClient(x.url, "mm-news", "maker password")
-	listed, err := c.Tickers(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	n := NewNews(listed, 1)
+	n := NewNews(1)
 	n.Rate = 1
 	snap, err := c.Prices(ctx)
 	if err != nil {
@@ -298,16 +335,16 @@ func startMakers(t *testing.T, x *exchange) []running {
 		t.Fatalf("Tickers = %d, %v", len(listed), err)
 	}
 	return []running{
-		{c, NewLiquidity(listed, 7)},
+		{c, NewLiquidity(7)},
 		{NewHTTPClient(x.url, "mm-flow", "maker password"), NewFlow(8)},
-		{NewHTTPClient(x.url, "mm-momentum", "maker password"), NewMomentum(listed, 9)},
-		{NewHTTPClient(x.url, "mm-news", "maker password"), NewNews(listed, 10)},
+		{NewHTTPClient(x.url, "mm-momentum", "maker password"), NewMomentum(9)},
+		{NewHTTPClient(x.url, "mm-news", "maker password"), NewNews(10)},
 	}
 }
 
 // TestMakersMoveThePrice runs every strategy against a real in-process
 // exchange over HTTP and checks that prices move with no other traders,
-// stay near their references, and that the books balance.
+// don't run away, and that the books balance.
 func TestMakersMoveThePrice(t *testing.T) {
 	x := newExchange(t)
 	running := startMakers(t, x)
@@ -596,7 +633,7 @@ func (r *recordingFlow) Orders(snap Snapshot, acct Account) []Order {
 }
 
 func TestNewsSurvivesInvertedStoryLength(t *testing.T) {
-	n := NewNews([]Ticker{{"ACME", 1000}}, 1)
+	n := NewNews(1)
 	Configure(n, Settings(n), map[string]float64{"rate": 1, "min_ticks": 9, "max_ticks": 2})
 	if n.MinTicks != 9 || n.MaxTicks != 2 {
 		t.Fatalf("settings not applied: %+v", n)

@@ -70,13 +70,13 @@ The endpoints a bot uses:
 | `quantity` | Whole shares, more than 0. |
 | `limit_price` | Cents. Only for `LIMIT` orders. |
 | `max_cost` | Cents. Required on `MARKET` `BUY` orders, and not allowed otherwise. It caps the total spend, and the order fills only as many shares as it covers. |
-| `time_in_force` | `IOC` or `GTC` (the default). `IOC` means anything unfilled after the next auction is cancelled. A `GTC` order rests until it fills. |
+| `time_in_force` | `IOC` or `GTC` (the default). `IOC` means anything unfilled after the next auction is cancelled. A `GTC` order rests until it fills or you cancel it. |
 
 An accepted order returns `202` with its `id`. It hasn't traded yet: it trades at the next auction. To see what filled, read `GET /v1/account/trades` after that auction and match fills by `order_id`. An order may fill in part.
 
 When you place an order, t3 sets aside what it could need: cash for a buy (`quantity × limit_price`, or `max_cost`) or shares for a sell. Those show as `cash_held` and `held` in the portfolio, and you can't spend them twice. Whatever isn't used is released once the order is done.
 
-**Use `IOC`.** There's no endpoint to list or cancel open orders yet, so a `GTC` order that doesn't fill keeps its cash or shares locked until it does.
+**Prefer `IOC`.** A `GTC` order that doesn't fill keeps its cash or shares locked until it does. `GET /v1/orders` lists your open orders with what each holds, and `DELETE /v1/orders/{id}` cancels one at the next auction, releasing its funds once that auction settles.
 
 ## 4. Time your loop to the auctions
 

@@ -1,6 +1,6 @@
 import type { ComponentChildren } from 'preact';
 import { useCallback, useEffect, useMemo, useState } from 'preact/hooks';
-import type { Api, Candle, Fill, Interval, Portfolio, Trade } from './api';
+import type { Api, Candle, Fill, Interval, OpenOrder, Portfolio, Trade } from './api';
 import { AccountMenu } from './components/AccountMenu';
 import { Admin } from './components/Admin';
 import { AuthPanel } from './components/AuthPanel';
@@ -10,7 +10,7 @@ import { Markets } from './components/Markets';
 import { News } from './components/News';
 import { Pool } from './components/Pool';
 import { Portfolio as PortfolioPage } from './components/Portfolio';
-import { Fills, Positions, Tape } from './components/Tables';
+import { Fills, OpenOrders, Positions, Tape } from './components/Tables';
 import { Ticket } from './components/Ticket';
 import { money, percent, shares, signedMoney, trendClass } from './format';
 import { useNow, usePrices, useRoute, useSession } from './hooks';
@@ -27,7 +27,8 @@ export function App({ api }: { api: Api }) {
 	const [tape, setTape] = useState<Trade[]>([]);
 	const [portfolio, setPortfolio] = useState<Portfolio | null>(null);
 	const [fills, setFills] = useState<Fill[]>([]);
-	const [tab, setTab] = useState<'positions' | 'fills' | 'tape'>('positions');
+	const [openOrders, setOpenOrders] = useState<OpenOrder[]>([]);
+	const [tab, setTab] = useState<TabId>('positions');
 	const now = useNow(250);
 
 	const prices = useMemo(() => new Map(snapshot?.prices.map((p) => [p.symbol, p])), [snapshot]);
@@ -55,13 +56,23 @@ export function App({ api }: { api: Api }) {
 		if (!api.token) return;
 		api.portfolio().then(setPortfolio, () => {});
 		api.fills().then(setFills, () => {});
+		api.openOrders().then(setOpenOrders, () => {});
 	}, [api]);
+
+	const cancelOrder = useCallback(
+		async (id: string) => {
+			const cancelled = await api.cancelOrder(id);
+			setOpenOrders((os) => os.map((o) => (o.id === id ? cancelled : o)));
+		},
+		[api],
+	);
 
 	useEffect(() => {
 		if (session) refreshAccount();
 		else {
 			setPortfolio(null);
 			setFills([]);
+			setOpenOrders([]);
 		}
 	}, [session, tick, refreshAccount]);
 
@@ -203,6 +214,9 @@ export function App({ api }: { api: Api }) {
 									<Tab id="positions" tab={tab} setTab={setTab}>
 										Positions
 									</Tab>
+									<Tab id="orders" tab={tab} setTab={setTab}>
+										Open orders{openOrders.length > 0 && ` (${openOrders.length})`}
+									</Tab>
 									<Tab id="fills" tab={tab} setTab={setTab}>
 										Your fills
 									</Tab>
@@ -217,6 +231,8 @@ export function App({ api }: { api: Api }) {
 								<Tape trades={tape} />
 							) : !portfolio ? null : tab === 'positions' ? (
 								<Positions portfolio={portfolio} prices={prices} onSelect={select} />
+							) : tab === 'orders' ? (
+								<OpenOrders orders={openOrders} onCancel={cancelOrder} onSelect={select} />
 							) : (
 								<Fills fills={fills} onSelect={select} />
 							)}
@@ -258,7 +274,7 @@ function Stat({ label, value, big }: { label: string; value: string; big?: boole
 	);
 }
 
-type TabId = 'positions' | 'fills' | 'tape';
+type TabId = 'positions' | 'orders' | 'fills' | 'tape';
 
 function Tab({ id, tab, setTab, children }: { id: TabId; tab: TabId; setTab: (t: TabId) => void; children: ComponentChildren }) {
 	return (

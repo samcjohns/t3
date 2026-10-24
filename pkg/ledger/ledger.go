@@ -28,6 +28,7 @@ import (
 	"math"
 	"math/big"
 	"slices"
+	"strings"
 	"sync"
 	"time"
 
@@ -149,7 +150,7 @@ type Config struct {
 	Store Store
 	// Clock timestamps holds and entries. Defaults to time.Now.
 	Clock func() time.Time
-	// Prices are each symbol's reference price, which values its holdings
+	// Prices are each symbol's opening price, which values its holdings
 	// for margin checks until it first trades.
 	Prices   map[string]int64
 	Leverage Leverage
@@ -686,6 +687,30 @@ func (l *Ledger) Account(id string) (Account, error) {
 	out := a.snapshot(id)
 	out.PoolValue = l.pool.stake(a.poolShares)
 	out.Owed = l.pool.owed(a.loans)
+	return out, nil
+}
+
+// OpenOrders returns the account's orders that still hold funding, oldest
+// first. Quantity is each order's original quantity and Remaining what is
+// left of it.
+func (l *Ledger) OpenOrders(accountID string) ([]HoldState, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if _, ok := l.accounts[accountID]; !ok {
+		return nil, fmt.Errorf("%w: %q", ErrUnknownAccount, accountID)
+	}
+	out := []HoldState{}
+	for _, h := range l.holds {
+		if h.order.AccountID == accountID {
+			out = append(out, h.state())
+		}
+	}
+	slices.SortFunc(out, func(a, b HoldState) int {
+		if c := a.CreatedAt.Compare(b.CreatedAt); c != 0 {
+			return c
+		}
+		return strings.Compare(a.Order.ID, b.Order.ID)
+	})
 	return out, nil
 }
 

@@ -277,7 +277,7 @@ export function Ticket({ api, price, portfolio, secondsToAuction, onPlaced }: Pr
 					{result.text}
 				</p>
 			)}
-			{type === 'LIMIT' && tif === 'GTC' && <p class="hint">GTC orders stay in the book until they fill. There's no way to cancel them yet.</p>}
+			{type === 'LIMIT' && tif === 'GTC' && <p class="hint">GTC orders stay in the book until they fill, or you cancel them under Open orders.</p>}
 		</form>
 	);
 }

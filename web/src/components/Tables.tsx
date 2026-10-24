@@ -1,4 +1,5 @@
-import type { Fill, Portfolio, Price, Trade } from '../api';
+import { useState } from 'preact/hooks';
+import { ApiError, type Fill, type OpenOrder, type Portfolio, type Price, type Trade } from '../api';
 import { clock, money, percent, shares, trendClass } from '../format';
 
 export function Positions({ portfolio, prices, onSelect }: { portfolio: Portfolio; prices: Map<string, Price>; onSelect: (s: string) => void }) {
@@ -61,6 +62,80 @@ export function Fills({ fills, onSelect }: { fills: Fill[]; onSelect: (s: string
 				))}
 			</tbody>
 		</table>
+	);
+}
+
+/** Your orders that haven't filled or expired, with what each holds and a way to cancel it. */
+export function OpenOrders({ orders, onCancel, onSelect }: { orders: OpenOrder[]; onCancel: (id: string) => Promise<unknown>; onSelect: (s: string) => void }) {
+	const [busy, setBusy] = useState('');
+	const [error, setError] = useState('');
+	if (!orders.length) return <p class="empty">No open orders. Limit orders that don't fill wait here until they do, or you cancel them.</p>;
+
+	const cancel = async (e: Event, id: string) => {
+		e.stopPropagation();
+		setBusy(id);
+		setError('');
+		try {
+			await onCancel(id);
+		} catch (err) {
+			setError(err instanceof ApiError ? err.message : 'The order could not be cancelled.');
+		} finally {
+			setBusy('');
+		}
+	};
+
+	return (
+		<>
+			{error && (
+				<p class="notice err" role="alert">
+					{error}
+				</p>
+			)}
+			<table>
+				<thead>
+					<tr>
+						<th>Placed</th>
+						<th>Symbol</th>
+						<th>Side</th>
+						<th>Type</th>
+						<th class="num">Unfilled</th>
+						<th class="num">Limit</th>
+						<th class="num">Holds</th>
+						<th class="num" aria-label="Cancel" />
+					</tr>
+				</thead>
+				<tbody>
+					{orders.map((o) => (
+						<tr key={o.id} class="clickable" onClick={() => onSelect(o.symbol)}>
+							<td class="muted">{clock(o.created_at)}</td>
+							<td class="sym">{o.symbol}</td>
+							<td class={o.direction === 'BUY' ? 'up' : 'down'}>
+								{o.direction === 'BUY' ? 'Buy' : 'Sell'}
+								{o.leverage > 1 && <span class="muted"> {o.leverage}x</span>}
+							</td>
+							<td>{o.type === 'MARKET' ? 'Market' : `Limit ${o.time_in_force}`}</td>
+							<td class="num">
+								{shares(o.remaining)}
+								{o.remaining !== o.quantity && <span class="muted"> of {shares(o.quantity)}</span>}
+							</td>
+							<td class="num">{o.type === 'LIMIT' ? money(o.limit_price) : '—'}</td>
+							<td class="num">{o.direction === 'BUY' ? money(o.cash_held) : `${shares(o.shares_held)} sh`}</td>
+							<td class="num">
+								{o.status === 'cancelling' ? (
+									<span class="muted" title="It leaves the book at the next auction, unless it fills first.">
+										Cancelling…
+									</span>
+								) : (
+									<button class="small-btn danger" disabled={busy === o.id} onClick={(e) => cancel(e, o.id)}>
+										{busy === o.id ? 'Cancelling…' : 'Cancel'}
+									</button>
+								)}
+							</td>
+						</tr>
+					))}
+				</tbody>
+			</table>
+		</>
 	);
 }
 

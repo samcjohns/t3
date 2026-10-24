@@ -1,3 +1,6 @@
 .git
 *.test
 web
+links
+links.json
+.env
