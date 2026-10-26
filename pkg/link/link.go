@@ -166,8 +166,9 @@ func (m *Maker) fetchDue(ctx context.Context) {
 	}
 }
 
-// Orders quotes deep walls on each linked symbol either side of the link's
-// corridor. Unlinked symbols, and links not yet fetched, are left alone.
+// Orders trades each linked symbol gently towards its anchor and quotes deep
+// walls either side of the link's corridor. Unlinked symbols, and links not
+// yet fetched, are left alone.
 func (m *Maker) Orders(snap marketmaker.Snapshot, acct marketmaker.Account) []marketmaker.Order {
 	now := m.Now()
 	m.mu.Lock()
@@ -195,6 +196,9 @@ func (m *Maker) Orders(snap marketmaker.Snapshot, acct marketmaker.Account) []ma
 		}
 		st.Anchor += (1 - math.Pow(0.5, dt/(l.HalfLifeDays*86400))) * (st.Target - st.Anchor)
 
+		if o, ok := pull(p.Symbol, last, st.Anchor, s, &cash, shares); ok {
+			out = append(out, o)
+		}
 		bid := math.Min(st.Anchor*(1-s.Band), last*(1+s.MaxLean))
 		ask := math.Max(st.Anchor*(1+s.Band), last*(1-s.MaxLean))
 		out = append(out, walls(m.rng, p.Symbol, bid, ask, s.Depth, &cash, shares)...)
@@ -242,6 +246,33 @@ func (m *Maker) retarget(l Link, st *symbolState, last float64) {
 		st.Anchor = last
 	}
 	m.log.Info("link target", "symbol", l.Symbol, "signal", st.Signal, "target", st.Target, "uncapped", raw, "price", last)
+}
+
+// pullAggression is how far past the last price a pull order trades.
+const pullAggression = 0.003
+
+// pull returns an IOC order towards anchor, sized by how far the price is
+// from it as a fraction of the band, or false if there is nothing to trade.
+func pull(symbol string, last, anchor float64, s Settings, cash *int64, shares map[string]int64) (marketmaker.Order, bool) {
+	if s.Band <= 0 {
+		return marketmaker.Order{}, false
+	}
+	dev := (anchor - last) / anchor
+	notional := float64(s.Pull) * math.Min(1, math.Abs(dev)/s.Band)
+	if dev > 0 {
+		limit := int64(math.Ceil(last * (1 + pullAggression)))
+		if qty := min(int64(notional)/limit, *cash/limit); qty > 0 {
+			*cash -= qty * limit
+			return ioc(symbol, "BUY", qty, limit), true
+		}
+		return marketmaker.Order{}, false
+	}
+	limit := max(1, int64(math.Floor(last*(1-pullAggression))))
+	if qty := min(int64(notional)/limit, shares[symbol]); qty > 0 {
+		shares[symbol] -= qty
+		return ioc(symbol, "SELL", qty, limit), true
+	}
+	return marketmaker.Order{}, false
 }
 
 // walls quotes depth on each side, as a ladder of bids down from bidAt and

@@ -2,7 +2,8 @@
   "settings": {
     "fetch_at": "22:00",
     "depth": 30000000,
-    "band": 0.03,
+    "band": 0.25,
+    "pull": 100000,
     "max_lean": 0.005,
     "max_daily_move": 0.15
   },

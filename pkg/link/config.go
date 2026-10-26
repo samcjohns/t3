@@ -32,10 +32,14 @@ type Settings struct {
 	// in cents. Default $300,000, three times the liquidity maker's.
 	Depth int64 `json:"depth,omitempty"`
 	// Band is the corridor around a link's anchor that the price may wander
-	// in freely. The maker's bids start at its bottom and asks at its top, so
-	// as the anchor moves, the corridor's walls push the price along.
-	// Default 3%.
+	// in. The maker's bids start at its bottom and asks at its top, so the
+	// walls are a backstop the price rarely reaches. Default 25%.
 	Band float64 `json:"band,omitempty"`
+	// Pull is the order size, in cents, the maker trades towards the anchor
+	// each tick when the price is a full Band away, scaled down in proportion
+	// closer in. It is a gentle bias the other makers' noise hides from tick
+	// to tick but that sets the long-term trend. Default $1,000.
+	Pull int64 `json:"pull,omitempty"`
 	// MaxLean caps how far past the last price a wall may start, so a price
 	// outside the corridor is pushed back gradually. Default 0.5% a tick.
 	MaxLean float64 `json:"max_lean,omitempty"`
@@ -51,7 +55,10 @@ func (s Settings) withDefaults() Settings {
 		s.Depth = 30_000_000
 	}
 	if s.Band == 0 {
-		s.Band = 0.03
+		s.Band = 0.25
+	}
+	if s.Pull == 0 {
+		s.Pull = 100_000
 	}
 	if s.MaxLean == 0 {
 		s.MaxLean = 0.005
@@ -69,6 +76,8 @@ func (s Settings) validate() error {
 	switch {
 	case s.Depth < 0:
 		return fmt.Errorf("depth must be positive")
+	case s.Pull < 0:
+		return fmt.Errorf("pull must be positive")
 	case !between(s.Band, 0, 0.5):
 		return fmt.Errorf("band must be between 0 and 0.5")
 	case !between(s.MaxLean, 0, 0.5):

@@ -39,7 +39,7 @@ That's still more volatile than real stocks, which typically move 1–2% a day. 
 The link maker is built as `cmd/linkbot` and `pkg/link`, and runs as the Compose service `mm-anchor`. It is documented in `docs/api.md` under "The link maker", and `links.example.json` shows the file format.
 
 - **Sources:** Finnhub for stocks (`T3_FINNHUB_API_KEY`), Coinbase for crypto (no key), Open-Meteo for weather (no key, yesterday's daily value), and FRED for commodities and BLS retail prices (`T3_FRED_API_KEY`).
-- **How it moves prices:** an anchor closes on each day's target over `half_life_days`. Heavy IOC walls sit `band` (±3%) either side of the anchor and push the price along.
+- **How it moves prices:** an anchor closes on each day's target over `half_life_days`. Each tick it trades up to `pull` ($1,000) towards the anchor, in proportion to the gap, and heavy IOC walls sit `band` (±25%) either side of it as a backstop.
 - **Cash:** the `mm-anchor` account is seeded with $25M through the new `name=cents` syntax in `T3_MARKET_MAKERS`. Its shares are the normal listing seed, which limits how hard it can push a price down.
 - **State:** saved in the `t3-link` volume.
 

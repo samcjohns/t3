@@ -280,10 +280,15 @@ func TestOrdersLeanAndStayFunded(t *testing.T) {
 		t.Fatalf("quotes %d/%d; want them around 1000", bid, ask)
 	}
 
-	// Far below its anchor, bids lean up, but no further than max_lean.
+	// Far below its anchor, it pulls with a full-size buy, and bids lean up,
+	// but no further than max_lean.
 	m.state["ACME"].Anchor = 1e6
-	for _, o := range m.Orders(snap(map[string]int64{"ACME": 1000}), acct) {
-		if o.Direction == "BUY" && (o.LimitPrice > 1005 || o.LimitPrice < 1000*0.97) {
+	orders = m.Orders(snap(map[string]int64{"ACME": 1000}), acct)
+	if o := orders[0]; o.Direction != "BUY" || o.LimitPrice != 1003 || o.Quantity != 99 {
+		t.Fatalf("pull %+v; want $1,000 bought at 1003", o)
+	}
+	for _, o := range orders[1:] {
+		if o.Direction == "BUY" && (o.LimitPrice > 1005 || o.LimitPrice < 1000*0.75) {
 			t.Fatalf("bid %d leans past max_lean", o.LimitPrice)
 		}
 		if o.Direction == "SELL" && o.LimitPrice <= 1005 {
